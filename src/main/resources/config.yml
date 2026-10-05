@@ -13,7 +13,51 @@ telegram:
   # regardless of admin-ids or the tgauth.admin permission.
   admin-panel-enabled: true
 
+# PIN protection for the bot's /admin panel. On the first /admin the admin is asked to set a PIN;
+# afterwards every /admin (and every expired session) asks for it. The PIN is stored only as a
+# salted PBKDF2 hash, and it is entered with an inline keypad (buttons) so it never appears in the chat.
+admin-pin:
+  enabled: true
+  # An in-game admin (permission tgauth.admin, linked Telegram) stays frozen exactly like an
+  # unauthenticated player after logging in until they have set their panel PIN in the bot.
+  freeze-admins-until-pin-set: true
+  # Kick a frozen admin who hasn't set the PIN after this many seconds (0 = never kick).
+  setup-timeout-seconds: 300
+  # PIN length limits (digits only). The minimum can't go below 4.
+  min-length: 4
+  max-length: 12
+  # Wrong PIN entries in a row before PIN entry is locked.
+  max-attempts: 3
+  # Lockout length (seconds) for the FIRST lockout.
+  lockout-seconds: 300
+  # Escalation: every further lockout in a row lasts this many times longer than the previous
+  # one. 2.0 = 5 min, 10 min, 20 min, 40 min, ... 1.0 = always lockout-seconds (no growth).
+  lockout-growth: 2.0
+  # Upper limit (seconds) for an escalated lockout.
+  lockout-max-seconds: 86400
+  # After this many minutes without a new lockout the escalation starts over from the first step.
+  # A correct PIN resets it immediately.
+  lockout-level-reset-minutes: 1440
+  # How long the panel stays unlocked after the last action (minutes, minimum 1).
+  session-timeout-minutes: 15
+  # How long (seconds) the alarm siren plays for an admin who is online in-game while their PIN
+  # is being brute-forced. 0 = no sound (the chat message and title are still shown).
+  siren-seconds: 10
+
+# Looks for a newer release at https://github.com/googllle9g/TgAuth-plugin/releases. The check runs
+# fully in the background (it never blocks the server thread) and failures are silent.
+update-checker:
+  enabled: true
+  # How often to check, in hours (minimum 1). GitHub allows 60 anonymous requests per hour per IP.
+  check-interval-hours: 12
+  # Tell admins (tgauth.admin) in-game about a new version right after they log in.
+  notify-admins: true
+
 auth:
+  # How many game accounts one Telegram account may link (e.g. a main and an alt). 1 = one account per
+  # Telegram. Every linked account is confirmed in the same chat. Admins can still use /tgauth forcelink
+  # to go over the limit.
+  max-accounts-per-telegram: 1
   # How long (seconds) a /link code stays valid.
   code-expire-seconds: 300
   # How long (seconds) a login-confirmation request (Confirm/Reject buttons) stays valid.
@@ -66,7 +110,41 @@ fastlogin:
   premium-check-wait-seconds: 4
 
 storage:
+  # Where linked accounts (and admin-panel PINs) are stored. All three options go through a
+  # HikariCP connection pool:
+  #   sqlite  - a local file, nothing to set up (default)
+  #   mysql   - a MySQL server; uses the MySQL driver that Paper ships with
+  #   mariadb - a MariaDB server; uses the MariaDB driver built into TgAuth (it also talks to MySQL)
+  # Switching the type does NOT copy existing data. After switching to mysql/mariadb, restart and
+  # run /tgauth migrate once to import the old SQLite file.
+  type: "sqlite"
+
+  # The SQLite file (type: sqlite). Also the source file for /tgauth migrate.
   file: "database.db"
+
+  # Used when type is mysql or mariadb.
+  mysql:
+    host: "localhost"
+    port: 3306
+    database: "tgauth"
+    username: "tgauth"
+    password: ""
+    # Encrypt the connection. Turn this on for any database that is not on the same machine.
+    use-ssl: false
+    # Put in front of the table names (letters, digits, underscore) so TgAuth can share a database.
+    table-prefix: "tgauth_"
+    # HikariCP pool settings.
+    pool:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout-ms: 10000
+      # Keep this below the database's wait_timeout.
+      max-lifetime-ms: 1800000
+    # Extra JDBC driver options, applied on top of the defaults. Example: MySQL 8 without SSL may
+    # answer "Public Key Retrieval is not allowed" - then add:
+    #   properties:
+    #     allowPublicKeyRetrieval: "true"
+    properties: {}
 
 security:
   # Protects the /link <code> flow against brute-forcing the code (it's a 6-digit number,
@@ -91,9 +169,19 @@ security:
 admin-commands:
   kick-command: ""
   ban-command: ""
+  tempban-command: ""
   unban-command: ""
   # A "warn" here means running a command (e.g. a punishment plugin's own /warn), not sending
-  # the player a chat message - set this if you want warns to go through that plugin instead of
-  # TgAuth just messaging the player directly (the built-in default).
+  # the player a chat message - set warn-command/tempwarn-command if you want warns to go
+  # through that plugin instead of TgAuth just messaging the player directly (the built-in
+  # default). Same permanent/temporary split as bans.
   warn-command: ""
+  tempwarn-command: ""
 
+
+# Settings for the addon API (see docs/API.md). Other plugins can listen to TgAuth events and add
+# their own Telegram bot commands without any configuration.
+api:
+  # Allow other plugins to log a player in through TgAuthAPI#authenticate(). This lets them SKIP the
+  # Telegram login, so leave it off unless you trust the plugin that needs it.
+  allow-external-authentication: false

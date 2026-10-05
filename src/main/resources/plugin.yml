@@ -9,7 +9,7 @@ softdepend: [FastLogin]
 commands:
   tgauth:
     description: Admin command for TgAuth
-    usage: /tgauth <reload|unlink|forcelink|userinfo|fastlogin> [player] [telegramId]
+    usage: /tgauth <reload|unlink|forcelink|userinfo|fastlogin|pinreset|update|migrate> [player] [telegramId]
     permission: tgauth.admin
   tgcode:
     description: Resend your Telegram linking code

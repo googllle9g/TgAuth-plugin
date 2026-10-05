@@ -1,6 +1,10 @@
 package net.millyland.auth;
 
+import net.millyland.auth.admin.AdminPinService;
+import net.millyland.auth.api.TgAuthAPI;
 import net.millyland.auth.auth.AuthManager;
+import net.millyland.auth.internal.AddonCleanupListener;
+import net.millyland.auth.internal.TgAuthApiImpl;
 import net.millyland.auth.command.TgAuthCommand;
 import net.millyland.auth.command.TgCodeCommand;
 import net.millyland.auth.config.Config;
@@ -12,7 +16,9 @@ import net.millyland.auth.listener.PlayerProtectListener;
 import net.millyland.auth.listener.UuidMigrationListener;
 import net.millyland.auth.storage.Database;
 import net.millyland.auth.telegram.TelegramService;
+import net.millyland.auth.update.UpdateChecker;
 import org.bukkit.Bukkit;
+import org.bukkit.plugin.ServicePriority;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.io.File;
@@ -23,9 +29,12 @@ public class TgAuthPlugin extends JavaPlugin {
     private Lang lang;
     private Database database;
     private AuthManager authManager;
+    private AdminPinService adminPinService;
+    private UpdateChecker updateChecker;
     private FastLoginHook fastLoginHook;
     private LuckPermsHook luckPermsHook;
     private TelegramService telegramService;
+    private TgAuthApiImpl api;
     private File primaryWorldContainer;
 
     @Override
@@ -42,7 +51,10 @@ public class TgAuthPlugin extends JavaPlugin {
             return;
         }
 
+        this.api = new TgAuthApiImpl(this);
         this.authManager = new AuthManager(this);
+        this.adminPinService = new AdminPinService(this);
+        this.updateChecker = new UpdateChecker(this);
         this.fastLoginHook = new FastLoginHook(this);
         this.luckPermsHook = new LuckPermsHook(this);
 
@@ -51,17 +63,14 @@ public class TgAuthPlugin extends JavaPlugin {
             getLogger().severe("Telegram bot token is not configured in config.yml! The plugin will not work until you set telegram.bot-token.");
         } else {
             this.telegramService = new TelegramService(this);
-            try {
-                telegramService.start();
-                getLogger().info("Telegram bot started.");
-            } catch (Exception e) {
-                getLogger().severe("Failed to start Telegram bot: " + e.getMessage());
-            }
+            startTelegramWithRetry();
         }
 
         getServer().getPluginManager().registerEvents(new PlayerJoinQuitListener(this), this);
         getServer().getPluginManager().registerEvents(new PlayerProtectListener(this), this);
         getServer().getPluginManager().registerEvents(new UuidMigrationListener(this), this);
+        getServer().getPluginManager().registerEvents(new AddonCleanupListener(api.registry()), this);
+        getServer().getServicesManager().register(TgAuthAPI.class, api, this, ServicePriority.Normal);
 
         this.primaryWorldContainer = Bukkit.getWorlds().isEmpty() ? null : Bukkit.getWorlds().get(0).getWorldFolder();
         if (primaryWorldContainer == null) {
@@ -89,11 +98,48 @@ public class TgAuthPlugin extends JavaPlugin {
             }
         }
 
+        updateChecker.start();
+
         getLogger().info("TgAuth enabled.");
+    }
+
+    /**
+     * Starts the bot off the main thread and keeps retrying (every 30 s) if Telegram can't be
+     * reached or rejects the token, logging the real cause instead of just "Error removing old webhook".
+     */
+    private void startTelegramWithRetry() {
+        final TelegramService service = this.telegramService;
+        getServer().getScheduler().runTaskAsynchronously(this, () -> {
+            int attempt = 0;
+            while (isEnabled() && service == this.telegramService) {
+                attempt++;
+                try {
+                    service.start();
+                    getLogger().info("Telegram bot started.");
+                    return;
+                } catch (Throwable e) {
+                    Throwable root = e;
+                    while (root.getCause() != null && root.getCause() != root) root = root.getCause();
+                    getLogger().severe("Failed to start Telegram bot (attempt " + attempt + "): " + e.getMessage()
+                            + " | cause: " + root.getClass().getSimpleName() + ": " + root.getMessage()
+                            + " | Check telegram.bot-token, that api.telegram.org is reachable from this server "
+                            + "(firewall/DNS/proxy), and that no other program is polling this bot. Retrying in 30 s.");
+                }
+                try {
+                    Thread.sleep(30_000L);
+                } catch (InterruptedException ie) {
+                    return;
+                }
+            }
+        });
     }
 
     @Override
     public void onDisable() {
+        getServer().getServicesManager().unregisterAll(this);
+        if (updateChecker != null) {
+            updateChecker.stop();
+        }
         if (telegramService != null) {
             try {
                 telegramService.onClosing();
@@ -121,12 +167,25 @@ public class TgAuthPlugin extends JavaPlugin {
         return authManager;
     }
 
+    public AdminPinService adminPin() {
+        return adminPinService;
+    }
+
+    public UpdateChecker updateChecker() {
+        return updateChecker;
+    }
+
     public FastLoginHook fastLoginHook() {
         return fastLoginHook;
     }
 
     public LuckPermsHook luckPermsHook() {
         return luckPermsHook;
+    }
+
+    /** Internal implementation of the public {@link TgAuthAPI}. */
+    public TgAuthApiImpl api() {
+        return api;
     }
 
     public TelegramService telegram() {
