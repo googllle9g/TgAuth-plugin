@@ -24,9 +24,21 @@ public class TgAuthApiImpl implements TgAuthAPI {
     private final TgAuthPlugin plugin;
     private final TelegramCommandRegistry registry = new TelegramCommandRegistry();
     private final Executor async;
+    private final java.util.Map<String, ProviderEntry> providers = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private record ProviderEntry(Plugin owner, LoginProvider provider) {
+    }
+
+    private final AdminApiImpl adminApi;
+
+    @Override
+    public @NotNull net.millyland.auth.api.AdminApi admin() {
+        return adminApi;
+    }
 
     public TgAuthApiImpl(TgAuthPlugin plugin) {
         this.plugin = plugin;
+        this.adminApi = new AdminApiImpl(plugin);
         this.async = task -> {
             if (plugin.isEnabled()) {
                 Bukkit.getScheduler().runTaskAsynchronously(plugin, task);
@@ -93,26 +105,131 @@ public class TgAuthApiImpl implements TgAuthAPI {
                 () -> plugin.database().findByTelegramId(telegramId).map(TgAuthApiImpl::toInfo), async);
     }
 
-    // ---- authentication --------------------------------------------------------------------
-
     @Override
     public @NotNull CompletableFuture<List<LinkedAccountInfo>> getLinkedAccountsByTelegramId(long telegramId) {
         return CompletableFuture.supplyAsync(() -> plugin.database().findAllByTelegramId(telegramId).stream()
                 .map(TgAuthApiImpl::toInfo).toList(), async);
     }
 
+    // ---- login providers ---------------------------------------------------------------------
+
+    private static final java.util.regex.Pattern PROVIDER_ID = java.util.regex.Pattern.compile("[a-z0-9_]{1,24}");
+
     @Override
-    public boolean authenticate(@NotNull Plugin addon, @NotNull Player player) {
-        if (!Bukkit.isPrimaryThread()) {
-            throw new IllegalStateException("TgAuthAPI.authenticate must be called on the main thread");
-        }
-        if (!plugin.cfg().apiAllowExternalAuthentication()) {
-            plugin.getLogger().warning(addon.getName() + " tried to authenticate " + player.getName()
-                    + " but api.allow-external-authentication is false.");
+    public boolean registerLoginProvider(@NotNull Plugin owner, @NotNull LoginProvider provider) {
+        String id = provider.getId();
+        if (!PROVIDER_ID.matcher(id).matches() || id.equals("telegram")) {
+            plugin.getLogger().warning(owner.getName() + " tried to register a login provider with the invalid id \""
+                    + id + "\" (use a-z, 0-9, _ , 1-24 chars, not \"telegram\").");
             return false;
         }
-        if (!player.isOnline()) return false;
-        return plugin.authManager().authenticateExternal(player, addon.getName());
+        boolean added = providers.putIfAbsent(id, new ProviderEntry(owner, provider)) == null;
+        if (added) {
+            plugin.getLogger().info("Login provider \"" + id + "\" registered by " + owner.getName() + ".");
+            plugin.refreshAddMethodCommand();
+        }
+        return added;
+    }
+
+    @Override
+    public boolean unregisterLoginProvider(@NotNull Plugin owner, @NotNull String providerId) {
+        ProviderEntry entry = providers.get(providerId);
+        boolean removed = entry != null && entry.owner().equals(owner) && providers.remove(providerId, entry);
+        if (removed) plugin.refreshAddMethodCommand();
+        return removed;
+    }
+
+    @Override
+    public boolean registerProxyProvider(@NotNull Plugin owner, @NotNull net.millyland.auth.api.ProxyProvider provider) {
+        boolean added = plugin.proxies().register(owner, provider);
+        if (added) plugin.refreshProxy();
+        return added;
+    }
+
+    @Override
+    public boolean unregisterProxyProvider(@NotNull Plugin owner, @NotNull String providerId) {
+        boolean removed = plugin.proxies().unregister(owner, providerId);
+        if (removed) plugin.refreshProxy();
+        return removed;
+    }
+
+    @Override
+    public void refreshProxy() {
+        plugin.refreshProxy();
+    }
+
+    @Override
+    public @NotNull Optional<String> getActiveProxy() {
+        var used = plugin.activeProxy();
+        return used == null ? Optional.empty() : Optional.of(used.proxy().describe());
+    }
+
+    @Override
+    public @NotNull Optional<net.millyland.auth.api.ProxyConfig> getProxyConfig() {
+        var used = plugin.activeProxy();
+        return used == null ? Optional.empty() : Optional.of(used.proxy());
+    }
+
+    /** The registered provider with this id, or null. */
+    public LoginProvider provider(String id) {
+        ProviderEntry entry = id == null ? null : providers.get(id);
+        return entry == null ? null : entry.provider();
+    }
+
+    /** How many login providers are registered (available or not). */
+    public int providerCount() {
+        return providers.size();
+    }
+
+    /** Providers that can handle a new player right now, in registration-independent (alphabetical) order. */
+    public List<LoginProvider> availableProviders() {
+        List<LoginProvider> out = new java.util.ArrayList<>();
+        for (ProviderEntry entry : providers.values()) {
+            try {
+                if (entry.provider().isAvailable()) out.add(entry.provider());
+            } catch (Throwable t) {
+                plugin.getLogger().warning("Login provider " + entry.provider().getId() + " failed in isAvailable(): " + t);
+            }
+        }
+        out.sort(java.util.Comparator.comparing(LoginProvider::getId));
+        return out;
+    }
+
+    private static ExternalLinkInfo toExternalInfo(net.millyland.auth.storage.ExternalLink l) {
+        return new ExternalLinkInfo(l.provider(), l.uuid(), l.username(), l.externalId(),
+                l.externalName() == null || l.externalName().isBlank() ? null : l.externalName(),
+                l.linkedAt(), l.premium());
+    }
+
+    @Override
+    public @NotNull CompletableFuture<List<ExternalLinkInfo>> getExternalLinks(@NotNull UUID minecraftUuid) {
+        return CompletableFuture.supplyAsync(() -> plugin.database().findExternalsByUuid(minecraftUuid).stream()
+                .map(TgAuthApiImpl::toExternalInfo).toList(), async);
+    }
+
+    @Override
+    public @NotNull CompletableFuture<List<ExternalLinkInfo>> getExternalLinks(@NotNull String providerId,
+                                                                                @NotNull String externalId) {
+        return CompletableFuture.supplyAsync(() -> plugin.database().findAllExternal(providerId, externalId)
+                .stream().map(TgAuthApiImpl::toExternalInfo).toList(), async);
+    }
+
+    @Override
+    public @NotNull CompletableFuture<Boolean> unlinkExternal(@NotNull UUID minecraftUuid) {
+        return CompletableFuture.supplyAsync(() -> plugin.database().unlinkExternal(minecraftUuid), async);
+    }
+
+    @Override
+    public @NotNull CompletableFuture<Boolean> unlinkExternal(@NotNull UUID minecraftUuid, @NotNull String providerId) {
+        return CompletableFuture.supplyAsync(
+                () -> plugin.database().unlinkExternal(minecraftUuid, providerId), async);
+    }
+
+    /** Called when any plugin is disabled: drops everything it registered. */
+    public void cleanup(Plugin disabled) {
+        registry.unregisterAll(disabled);
+        if (providers.values().removeIf(e -> e.owner().equals(disabled))) plugin.refreshAddMethodCommand();
+        if (plugin.proxies().cleanup(disabled)) plugin.refreshProxy();
     }
 
     // ---- telegram --------------------------------------------------------------------------

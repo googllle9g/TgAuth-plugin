@@ -44,9 +44,20 @@ public class AdminPinService {
     private final TgAuthPlugin plugin;
     private final SecureRandom random = new SecureRandom();
 
-    /** telegramId -> epoch millis until which the panel stays unlocked (sliding idle timeout). */
-    private final Map<Long, Long> unlockedUntil = new ConcurrentHashMap<>();
-    private final Map<Long, Throttle> throttles = new ConcurrentHashMap<>();
+    /** The Telegram bot's own PIN namespace; addon panels use their provider id (for example "discord"). */
+    public static final String TELEGRAM = "telegram";
+
+    /** "namespace:subject" -> epoch millis until which the panel stays unlocked (sliding idle timeout). */
+    private final Map<String, Long> unlockedUntil = new ConcurrentHashMap<>();
+    private final Map<String, Throttle> throttles = new ConcurrentHashMap<>();
+
+    private static String key(String namespace, String subject) {
+        return namespace + ":" + subject;
+    }
+
+    private static String tg(long telegramId) {
+        return String.valueOf(telegramId);
+    }
 
     private static final class Throttle {
         int failed;
@@ -76,7 +87,22 @@ public class AdminPinService {
     // ------------------------------------------------------------------ PIN storage
 
     public boolean hasPin(long telegramId) {
-        return plugin.database().findAdminPin(telegramId).isPresent();
+        return hasPin(TELEGRAM, tg(telegramId));
+    }
+
+    public boolean hasPin(String namespace, String subject) {
+        return record(namespace, subject).isPresent();
+    }
+
+    private Optional<AdminPinRecord> record(String namespace, String subject) {
+        if (namespace.equals(TELEGRAM)) {
+            try {
+                return plugin.database().findAdminPin(Long.parseLong(subject));
+            } catch (NumberFormatException e) {
+                return Optional.empty();
+            }
+        }
+        return plugin.database().findExtPin(namespace, subject);
     }
 
     public boolean validFormat(String pin) {
@@ -101,21 +127,35 @@ public class AdminPinService {
     }
 
     public boolean savePin(long telegramId, PinDraft draft) {
-        boolean ok = plugin.database().saveAdminPin(telegramId,
-                Base64.getEncoder().encodeToString(draft.salt()),
-                Base64.getEncoder().encodeToString(draft.hash()),
-                PBKDF2_ITERATIONS);
+        return savePin(TELEGRAM, tg(telegramId), draft);
+    }
+
+    public boolean savePin(String namespace, String subject, PinDraft draft) {
+        String salt = Base64.getEncoder().encodeToString(draft.salt());
+        String hash = Base64.getEncoder().encodeToString(draft.hash());
+        boolean ok;
+        if (namespace.equals(TELEGRAM)) {
+            ok = plugin.database().saveAdminPin(Long.parseLong(subject), salt, hash, PBKDF2_ITERATIONS);
+        } else {
+            ok = plugin.database().saveExtPin(namespace, subject, salt, hash, PBKDF2_ITERATIONS);
+        }
         if (ok) {
-            throttles.remove(telegramId);
+            throttles.remove(key(namespace, subject));
         }
         return ok;
     }
 
     /** Removes the PIN (the admin will be asked to set a new one) and drops any unlocked session. */
     public boolean resetPin(long telegramId) {
-        boolean existed = plugin.database().deleteAdminPin(telegramId);
-        unlockedUntil.remove(telegramId);
-        throttles.remove(telegramId);
+        return resetPin(TELEGRAM, tg(telegramId));
+    }
+
+    public boolean resetPin(String namespace, String subject) {
+        boolean existed = namespace.equals(TELEGRAM)
+                ? plugin.database().deleteAdminPin(Long.parseLong(subject))
+                : plugin.database().deleteExtPin(namespace, subject);
+        unlockedUntil.remove(key(namespace, subject));
+        throttles.remove(key(namespace, subject));
         return existed;
     }
 
@@ -136,30 +176,48 @@ public class AdminPinService {
 
     /** True if the admin's panel is unlocked; a valid session is extended (sliding idle timeout). */
     public boolean isUnlocked(long telegramId) {
-        Long until = unlockedUntil.get(telegramId);
+        return isUnlocked(TELEGRAM, tg(telegramId));
+    }
+
+    public boolean isUnlocked(String namespace, String subject) {
+        String k = key(namespace, subject);
+        Long until = unlockedUntil.get(k);
         if (until == null) return false;
         long now = System.currentTimeMillis();
         if (until < now) {
-            unlockedUntil.remove(telegramId, until);
+            unlockedUntil.remove(k, until);
             return false;
         }
-        unlockedUntil.put(telegramId, now + plugin.cfg().adminPinSessionMinutes() * 60_000L);
+        unlockedUntil.put(k, now + plugin.cfg().adminPinSessionMinutes() * 60_000L);
         return true;
     }
 
     public void unlock(long telegramId) {
-        unlockedUntil.put(telegramId, System.currentTimeMillis() + plugin.cfg().adminPinSessionMinutes() * 60_000L);
+        unlock(TELEGRAM, tg(telegramId));
+    }
+
+    public void unlock(String namespace, String subject) {
+        unlockedUntil.put(key(namespace, subject),
+                System.currentTimeMillis() + plugin.cfg().adminPinSessionMinutes() * 60_000L);
     }
 
     public void lock(long telegramId) {
-        unlockedUntil.remove(telegramId);
+        lock(TELEGRAM, tg(telegramId));
+    }
+
+    public void lock(String namespace, String subject) {
+        unlockedUntil.remove(key(namespace, subject));
     }
 
     // ------------------------------------------------------------------ verification / brute-force lockout
 
     /** Seconds left of an active lockout for this admin, or 0 if entry isn't locked. */
     public long lockRemainingSeconds(long telegramId) {
-        Throttle t = throttles.get(telegramId);
+        return lockRemainingSeconds(TELEGRAM, tg(telegramId));
+    }
+
+    public long lockRemainingSeconds(String namespace, String subject) {
+        Throttle t = throttles.get(key(namespace, subject));
         if (t == null) return 0;
         synchronized (t) {
             long left = t.lockedUntil - System.currentTimeMillis();
@@ -168,7 +226,11 @@ public class AdminPinService {
     }
 
     public VerifyResult verify(long telegramId, String pin) {
-        Optional<AdminPinRecord> record = plugin.database().findAdminPin(telegramId);
+        return verify(TELEGRAM, tg(telegramId), pin);
+    }
+
+    public VerifyResult verify(String namespace, String subject, String pin) {
+        Optional<AdminPinRecord> record = record(namespace, subject);
         if (record.isEmpty()) {
             return new VerifyResult(Status.NO_PIN, 0, 0);
         }
@@ -178,7 +240,7 @@ public class AdminPinService {
         long levelResetMs = plugin.cfg().adminPinLockoutLevelResetMinutes() * 60_000L;
         long lockoutSeconds = 0;
 
-        Throttle t = throttles.computeIfAbsent(telegramId, k -> new Throttle());
+        Throttle t = throttles.computeIfAbsent(key(namespace, subject), k -> new Throttle());
         VerifyResult result;
         int failedAtLockout = 0;
 
@@ -197,7 +259,7 @@ public class AdminPinService {
                 t.level = 0;
             }
 
-            if (matchesRecord(record.get(), pin)) {
+            if (matchesRecord(record.get(), pin, key(namespace, subject))) {
                 t.failed = 0;
                 t.lockedUntil = 0;
                 t.level = 0;
@@ -223,18 +285,18 @@ public class AdminPinService {
         }
 
         if (result.status() == Status.LOCKED) {
-            onBruteForce(telegramId, failedAtLockout, lockoutSeconds);
+            onBruteForce(namespace, subject, failedAtLockout, lockoutSeconds);
         }
         return result;
     }
 
-    private boolean matchesRecord(AdminPinRecord record, String pin) {
+    private boolean matchesRecord(AdminPinRecord record, String pin, String owner) {
         try {
             byte[] salt = Base64.getDecoder().decode(record.salt());
             byte[] expected = Base64.getDecoder().decode(record.hash());
             return MessageDigest.isEqual(hash(pin, salt, record.iterations()), expected);
         } catch (IllegalArgumentException e) {
-            plugin.getLogger().warning("Stored admin PIN for Telegram ID " + record.telegramId()
+            plugin.getLogger().warning("Stored admin PIN for " + owner
                     + " is corrupted - reset it with /tgauth pinreset: " + e.getMessage());
             return false;
         }
@@ -250,22 +312,34 @@ public class AdminPinService {
 
     // ------------------------------------------------------------------ alerts
 
-    private void onBruteForce(long telegramId, int attempts, long lockoutSeconds) {
-        List<LinkedAccount> accounts = plugin.database().findAllByTelegramId(telegramId);
-        String name = accounts.isEmpty() ? "Telegram ID " + telegramId
-                : String.join(", ", accounts.stream().map(LinkedAccount::username).toList());
+    private void onBruteForce(String namespace, String subject, int attempts, long lockoutSeconds) {
+        // The game accounts behind this PIN: linked to the Telegram ID, or to the external account (Discord, ...)
+        List<UUID> uuids = new ArrayList<>();
+        List<String> names = new ArrayList<>();
+        if (namespace.equals(TELEGRAM)) {
+            for (LinkedAccount a : plugin.database().findAllByTelegramId(Long.parseLong(subject))) {
+                uuids.add(a.uuid());
+                names.add(a.username());
+            }
+        } else {
+            for (var l : plugin.database().findAllExternal(namespace, subject)) {
+                uuids.add(l.uuid());
+                names.add(l.username());
+            }
+        }
+        String label = namespace.equals(TELEGRAM) ? "Telegram ID " + subject : namespace + " ID " + subject;
+        String name = names.isEmpty() ? label : String.join(", ", names);
 
-        plugin.getLogger().warning("Admin panel PIN brute-force detected for " + name + " (Telegram ID "
-                + telegramId + "): " + attempts + " wrong attempts in a row, PIN entry locked for "
-                + lockoutSeconds + "s.");
+        plugin.getLogger().warning("Admin panel PIN brute-force detected for " + name + " (" + label + "): "
+                + attempts + " wrong attempts in a row, PIN entry locked for " + lockoutSeconds + "s.");
 
         String attemptsText = String.valueOf(attempts);
         String timeText = formatDuration(lockoutSeconds);
 
         Bukkit.getScheduler().runTask(plugin, () -> {
             List<Player> victims = new ArrayList<>();
-            for (LinkedAccount a : accounts) {
-                Player online = Bukkit.getPlayer(a.uuid());
+            for (UUID u : uuids) {
+                Player online = Bukkit.getPlayer(u);
                 if (online != null && online.isOnline()) victims.add(online);
             }
 

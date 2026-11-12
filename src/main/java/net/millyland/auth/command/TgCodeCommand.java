@@ -25,7 +25,8 @@ public class TgCodeCommand implements CommandExecutor {
         if (code.isEmpty()) {
             player.sendMessage(plugin.lang().pget("commands.tgcode-not-needed"));
         } else {
-            player.sendMessage(plugin.lang().pget("commands.tgcode-sent", "%code%", code.get()));
+            player.sendMessage(net.millyland.auth.ui.CopyCode.inText(plugin,
+                    plugin.lang().pget("commands.tgcode-sent", "%code%", code.get()), code.get(), "/link " + code.get()));
         }
         return true;
     }

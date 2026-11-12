@@ -1,6 +1,7 @@
 package net.millyland.auth.listener;
 
 import net.millyland.auth.TgAuthPlugin;
+import net.millyland.auth.storage.ExternalLink;
 import net.millyland.auth.storage.LinkedAccount;
 import net.millyland.auth.util.PlayerDataMigrator;
 import net.millyland.auth.util.UuidUtil;
@@ -28,16 +29,19 @@ public class UuidMigrationListener implements Listener {
         UUID newUuid = event.getUniqueId();
         String name = event.getName();
 
-        if (plugin.database().findByUuid(newUuid).isPresent()) {
+        if (plugin.database().findByUuid(newUuid).isPresent()
+                || !plugin.database().findExternalsByUuid(newUuid).isEmpty()) {
             return;
         }
 
-        Optional<LinkedAccount> byName = plugin.database().findByUsername(name);
-        if (byName.isEmpty() || byName.get().uuid().equals(newUuid)) {
+        // The old link may be a Telegram link or a login provider link; migrateUuid moves either.
+        Optional<UUID> byName = plugin.database().findByUsername(name).map(LinkedAccount::uuid)
+                .or(() -> plugin.database().findExternalsByUsername(name).stream().findFirst().map(ExternalLink::uuid));
+        if (byName.isEmpty() || byName.get().equals(newUuid)) {
             return;
         }
 
-        UUID oldUuid = byName.get().uuid();
+        UUID oldUuid = byName.get();
 
         UUID expectedOfflineUuid = UuidUtil.offlineUuidFor(name);
         boolean oldIsGenuineOffline = oldUuid.equals(expectedOfflineUuid);

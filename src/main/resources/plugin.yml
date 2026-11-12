@@ -14,11 +14,17 @@ commands:
   tgcode:
     description: Resend your Telegram linking code
     usage: /tgcode
+  tgchoose:
+    description: Choose how to log in (used by the clickable choice and the dialog)
+    usage: /tgchoose <method>
 
 permissions:
   tgauth.admin:
     description: Allows administration of TgAuth
     default: op
+  tgauth.addmethod:
+    description: Allows /add-auth-method (the command only exists while a login-provider addon is installed)
+    default: true
   tgauth.bypass:
     description: Allows bypassing the authorization requirement
     default: false

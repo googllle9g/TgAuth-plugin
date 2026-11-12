@@ -1,3 +1,6 @@
 target/
 dependency-reduced-pom.xml
 .vscode
+.mvn/
+.idea/
+auth.iml

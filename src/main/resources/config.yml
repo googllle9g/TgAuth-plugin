@@ -1,6 +1,12 @@
 language: "en"
 
 telegram:
+  # Use Telegram as a way to log in (link code + login confirmation). Set to false to turn it off: then NOBODY
+  # can log in through Telegram and an addon that adds another method (a login provider, e.g. DiscordTgAuth-addon)
+  # is REQUIRED, otherwise no player (except tgauth.bypass) can get in. The bot itself (admin panel, addon
+  # commands) keeps working when a token is set. Players already linked to Telegram only must be re-linked
+  # (/tgauth unlink <player>) to switch to the new method.
+  auth-enabled: true
   # Get a token from @BotFather
   bot-token: "PUT_YOUR_BOT_TOKEN_HERE"
   bot-username: "PUT_YOUR_BOT_USERNAME_HERE"
@@ -12,6 +18,24 @@ telegram:
   # Master switch for the /admin panel in the bot. Set to false to disable it entirely,
   # regardless of admin-ids or the tgauth.admin permission.
   admin-panel-enabled: true
+
+# Proxy for TgAuth's outgoing connections (the Telegram bot, optionally the update check) - useful where
+# api.telegram.org is blocked. A proxy set here always wins; if "enabled" is false, an addon that provides
+# proxies through the TgAuth API (ProxyProvider) is used when one is installed. Changing this needs /tgauth reload
+# or a restart.
+proxy:
+  enabled: false
+  # HTTP, SOCKS4 or SOCKS5 (SOCKS5 is recommended).
+  type: SOCKS5
+  host: ""
+  port: 1080
+  # Optional login. SOCKS5 logins are supported; with an HTTP proxy they may be ignored by the Telegram
+  # library - prefer a SOCKS5 proxy if you need a login. Leave empty if the proxy has no login.
+  username: ""
+  password: ""
+  # Also send the update check through the proxy. Only HTTP proxies work for that (the Java HTTP client has
+  # no SOCKS support); with a SOCKS proxy the update check connects directly.
+  use-for-updates: false
 
 # PIN protection for the bot's /admin panel. On the first /admin the admin is asked to set a PIN;
 # afterwards every /admin (and every expired session) asks for it. The PIN is stored only as a
@@ -50,6 +74,9 @@ update-checker:
   enabled: true
   # How often to check, in hours (minimum 1). GitHub allows 60 anonymous requests per hour per IP.
   check-interval-hours: 12
+  # false = only stable releases are reported. true = GitHub "pre-release" builds (betas, release
+  # candidates) count as updates too.
+  include-prereleases: false
   # Tell admins (tgauth.admin) in-game about a new version right after they log in.
   notify-admins: true
 
@@ -179,9 +206,16 @@ admin-commands:
   tempwarn-command: ""
 
 
-# Settings for the addon API (see docs/API.md). Other plugins can listen to TgAuth events and add
-# their own Telegram bot commands without any configuration.
-api:
-  # Allow other plugins to log a player in through TgAuthAPI#authenticate(). This lets them SKIP the
-  # Telegram login, so leave it off unless you trust the plugin that needs it.
-  allow-external-authentication: false
+# How new players are shown the choice of a login method and the instructions. The choice only appears when
+# an addon (for example DiscordTgAuth-addon) adds another method next to Telegram.
+ui:
+  # Use the vanilla Dialog window (a screen in the middle of the game) instead of clickable chat text.
+  # OFF by default. Needs Paper 1.21.7+ (Minecraft 1.21.6+ clients); on older servers it is ignored and chat is used.
+  # Paper's Dialog API is still experimental.
+  vanilla-dialog: false
+  # With the dialog on, also print the choice and the instructions in chat (handy for copying the code).
+  also-send-chat: false
+
+# The addon API (see docs/API.md): other plugins can listen to TgAuth events, add Telegram bot commands and
+# register extra login methods. Nothing to configure here: addons can never log a player in on their own,
+# TgAuth itself checks the licence, the trusted IP and the admin PIN for every method.

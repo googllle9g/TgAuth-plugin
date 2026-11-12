@@ -41,6 +41,14 @@ public class Config {
         return cfg.getString("language", "en");
     }
 
+    /**
+     * telegram.auth-enabled: false turns Telegram off as a login method. The bot may still run (admin panel),
+     * but nobody can link or confirm through it, so a login provider addon (e.g. DiscordTgAuth-addon) is required.
+     */
+    public boolean telegramAuthEnabled() {
+        return cfg.getBoolean("telegram.auth-enabled", true);
+    }
+
     public String botToken() {
         return cfg.getString("telegram.bot-token", "");
     }
@@ -280,12 +288,39 @@ public class Config {
         return Math.max(0, cfg.getInt("admin-pin.setup-timeout-seconds", 300));
     }
 
+    public boolean proxyEnabled() {
+        return cfg.getBoolean("proxy.enabled", false);
+    }
+
+    public boolean proxyForUpdates() {
+        return cfg.getBoolean("proxy.use-for-updates", false);
+    }
+
+    /** The proxy from config.yml, or null if disabled or its type/host/port are not valid. */
+    public net.millyland.auth.api.ProxyConfig configuredProxy() {
+        if (!proxyEnabled()) return null;
+        var type = net.millyland.auth.api.ProxyConfig.Type.parse(cfg.getString("proxy.type", "SOCKS5"));
+        if (type == null) return null;
+        try {
+            return new net.millyland.auth.api.ProxyConfig(type, String.valueOf(cfg.getString("proxy.host", "")).trim(),
+                    cfg.getInt("proxy.port", 1080), cfg.getString("proxy.username", ""),
+                    cfg.getString("proxy.password", ""));
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
     public boolean updateCheckerEnabled() {
         return cfg.getBoolean("update-checker.enabled", true);
     }
 
     public int updateCheckerIntervalHours() {
         return Math.max(1, cfg.getInt("update-checker.check-interval-hours", 12));
+    }
+
+    /** update-checker.include-prereleases: true also reports GitHub pre-releases as updates. */
+    public boolean updateCheckerIncludePrereleases() {
+        return cfg.getBoolean("update-checker.include-prereleases", false);
     }
 
     public boolean updateCheckerNotifyAdmins() {
@@ -297,7 +332,13 @@ public class Config {
         return Math.max(1, cfg.getInt("auth.max-accounts-per-telegram", 1));
     }
 
-    public boolean apiAllowExternalAuthentication() {
-        return cfg.getBoolean("api.allow-external-authentication", false);
+    /** ui.vanilla-dialog: show the choice and the instructions in the vanilla Dialog window (off by default). */
+    public boolean uiVanillaDialog() {
+        return cfg.getBoolean("ui.vanilla-dialog", false);
+    }
+
+    /** ui.also-send-chat: with the dialog on, also print the instructions in chat. */
+    public boolean uiAlsoSendChat() {
+        return cfg.getBoolean("ui.also-send-chat", false);
     }
 }

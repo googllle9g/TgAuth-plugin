@@ -100,6 +100,20 @@ public class Lang {
         return ChatColor.stripColor(color(msg));
     }
 
+    /** A list message (for example the lines of a dialog), coloured, with placeholders replaced. */
+    public java.util.List<String> getList(String path, Object... placeholdersKV) {
+        java.util.List<String> lines = messages.getStringList(path);
+        if (lines.isEmpty() && fallback != null) lines = fallback.getStringList(path);
+        java.util.List<String> out = new java.util.ArrayList<>();
+        for (String line : lines) {
+            for (int i = 0; i + 1 < placeholdersKV.length; i += 2) {
+                line = line.replace(String.valueOf(placeholdersKV[i]), String.valueOf(placeholdersKV[i + 1]));
+            }
+            out.add(color(line));
+        }
+        return out;
+    }
+
     private String color(String s) {
         return ChatColor.translateAlternateColorCodes('&', s);
     }

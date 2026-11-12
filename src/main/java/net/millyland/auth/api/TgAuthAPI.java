@@ -20,8 +20,14 @@ import java.util.concurrent.CompletableFuture;
  */
 public interface TgAuthAPI {
 
-    /** Bumped on breaking API changes. The current version is 1. */
-    int API_VERSION = 1;
+    /**
+     * Bumped on breaking API changes. Version 3 replaced {@code authenticate()}, {@code PlayerLinkRequiredEvent}
+     * and the other v2 helpers with {@link LoginProvider}: TgAuth now keeps the links, checks licence and trusted
+     * IP and logs players in itself, so an addon can no longer log a player in on its own. Version 4 added
+     * {@link #admin()}, version 5 added proxy support ({@link ProxyProvider}); both are additive: addons written for
+     * version 3 or 4 keep working.
+     */
+    int API_VERSION = 5;
 
     /** @return the API version of the installed TgAuth */
     int getApiVersion();
@@ -51,19 +57,6 @@ public interface TgAuthAPI {
     @NotNull CompletableFuture<List<LinkedAccountInfo>> getLinkedAccountsByTelegramId(long telegramId);
 
     /**
-     * Logs a player in on behalf of another plugin (for example a custom SSO or 2FA addon).
-     * Fires {@link net.millyland.auth.api.event.PlayerAuthenticateEvent} with {@link AuthMethod#EXTERNAL},
-     * and the admin PIN rules still apply to admins.
-     *
-     * <p>Disabled unless the server owner sets {@code api.allow-external-authentication: true} in
-     * TgAuth's config.yml, because it lets plugins skip the Telegram login.
-     *
-     * @return true if the player was authenticated or moved on to the admin PIN step; false if the
-     *         option is disabled, the player is already authenticated or the player is offline
-     */
-    boolean authenticate(@NotNull Plugin addon, @NotNull Player player);
-
-    /**
      * Registers a bot command (for example {@code "balance"} for {@code /balance}). Built-in
      * commands ({@code start, admin, link}) cannot be overridden. The command is removed
      * automatically when the registering plugin is disabled.
@@ -88,4 +81,71 @@ public interface TgAuthAPI {
      * Completes with false if the account is not linked or the bot is not running.
      */
     @NotNull CompletableFuture<Boolean> sendTelegramMessage(@NotNull UUID minecraftUuid, @NotNull String text);
+
+    // ---- API v3: login providers (Discord, web, ...) ---------------------------------------------
+
+    /**
+     * Adds a way to log in next to Telegram. New players are offered the choice (TgAuth shows it, in chat or in
+     * the vanilla dialog), TgAuth stores the links in its database, checks licence and trusted IP and logs
+     * players in. See {@link LoginProvider}. Removed automatically when the registering plugin is disabled.
+     *
+     * @return false if the id is invalid or already taken
+     */
+    boolean registerLoginProvider(@NotNull Plugin owner, @NotNull LoginProvider provider);
+
+    /** Removes a provider registered by this plugin. Existing links stay in the database. */
+    boolean unregisterLoginProvider(@NotNull Plugin owner, @NotNull String providerId);
+
+    /**
+     * Lets an addon supply the proxy TgAuth connects to Telegram through. A proxy set in TgAuth's own config
+     * ({@code proxy.enabled}) wins over providers; otherwise the first registered provider that returns a proxy is
+     * used. TgAuth reconnects the bot when the effective proxy changes. Removed automatically when the registering
+     * plugin is disabled. See {@link ProxyProvider}. Any thread.
+     *
+     * @return false if the id is invalid or already taken
+     */
+    boolean registerProxyProvider(@NotNull Plugin owner, @NotNull ProxyProvider provider);
+
+    /** Removes a provider registered by this plugin. @return true if something was removed */
+    boolean unregisterProxyProvider(@NotNull Plugin owner, @NotNull String providerId);
+
+    /**
+     * Asks TgAuth to ask the providers again; if the effective proxy changed, the Telegram bot reconnects through
+     * the new one. Call it after your {@link ProxyProvider#getProxy()} answer changed. Any thread.
+     */
+    void refreshProxy();
+
+    /**
+     * @return the proxy TgAuth currently uses, as {@code type://host:port} (never with credentials);
+     * empty for a direct connection
+     */
+    @NotNull Optional<String> getActiveProxy();
+
+    /**
+     * The proxy TgAuth currently uses, <b>including its login</b>, for addons that open their own connections
+     * (for example a Discord bot) and want to follow the server's proxy. Empty for a direct connection. Treat the
+     * password as a secret: never log or display it. Any thread.
+     */
+    @NotNull Optional<ProxyConfig> getProxyConfig();
+
+    /**
+     * Looks up the provider links of a Minecraft account (at most one per provider). Completes with an empty list
+     * if there are none.
+     */
+    @NotNull CompletableFuture<List<ExternalLinkInfo>> getExternalLinks(@NotNull UUID minecraftUuid);
+
+    /** Looks up every game account linked to one external account, oldest link first. */
+    @NotNull CompletableFuture<List<ExternalLinkInfo>> getExternalLinks(@NotNull String providerId,
+                                                                         @NotNull String externalId);
+
+    /** Removes every provider link of a Minecraft account. Completes with true if a link was removed. */
+    @NotNull CompletableFuture<Boolean> unlinkExternal(@NotNull UUID minecraftUuid);
+
+    /** Removes the link of one provider. Completes with true if a link was removed. */
+    @NotNull CompletableFuture<Boolean> unlinkExternal(@NotNull UUID minecraftUuid, @NotNull String providerId);
+
+    // ---- API v4: admin tools ----------------------------------------------------------------------
+
+    /** The actions of TgAuth's admin panel, for addons with an admin panel of their own. */
+    @NotNull AdminApi admin();
 }

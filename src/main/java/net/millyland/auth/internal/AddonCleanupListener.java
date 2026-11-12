@@ -7,14 +7,14 @@ import org.bukkit.event.server.PluginDisableEvent;
 /** Removes Telegram commands of addons that get disabled. */
 public class AddonCleanupListener implements Listener {
 
-    private final TelegramCommandRegistry registry;
+    private final TgAuthApiImpl api;
 
-    public AddonCleanupListener(TelegramCommandRegistry registry) {
-        this.registry = registry;
+    public AddonCleanupListener(TgAuthApiImpl api) {
+        this.api = api;
     }
 
     @EventHandler
     public void onPluginDisable(PluginDisableEvent event) {
-        registry.unregisterAll(event.getPlugin());
+        api.cleanup(event.getPlugin());
     }
 }

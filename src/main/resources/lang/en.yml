@@ -9,6 +9,10 @@ join:
   already-authenticated: "&aYou are already authenticated."
   trusted-ip-skip: "&aLogin confirmed automatically (trusted IP)."
 
+  provider-unavailable: "&c%provider% login is unavailable right now. Please try again later."
+  need-confirm-external: "&eA login confirmation request has been sent to your &f%provider% &eaccount. Please confirm it."
+  no-method: "&cNo login method is available right now (Telegram login is off and no other method is ready). Please try again later."
+  telegram-disabled: "&cTelegram login is turned off on this server and your account is linked to Telegram only. Ask an administrator to reset your link (/tgauth unlink)."
 link:
   success-ingame: "&aYour account has been linked to Telegram! Welcome."
   success-telegram: "✅ Account %player% has been linked to your Telegram."
@@ -19,6 +23,8 @@ link:
   already-linked-player: "❌ This game account is already linked to another Telegram."
   code-expired-kick: "&cLinking time expired. Please reconnect."
 
+  success-external: "&aYour account has been linked to %provider%! Welcome."
+  telegram-disabled: "Telegram login is turned off on this server."
 confirm:
   message: "🔐 Confirm login\nPlayer: %player%\nIP: %ip%\n\nIf this wasn't you, tap Reject."
   button-confirm: "✅ Confirm"
@@ -29,6 +35,8 @@ confirm:
   rejected-kick: "&cLogin rejected via Telegram."
   timeout-kick: "&cLogin confirmation timed out."
 
+  confirmed-external: "&aLogin confirmed via %provider%. Welcome!"
+  rejected-external: "&cLogin rejected via %provider%."
 commands:
   no-permission: "&cYou don't have permission to do that."
   player-only: "&cThis command is for players only."
@@ -57,6 +65,7 @@ commands:
   pinreset-success: "&aThe admin panel PIN for %player% was reset. They will be asked to set a new one on their next /admin."
   pinreset-nothing: "&7%player% has no admin panel PIN set."
 
+  userinfo-provider: "&7  Login method: &f%provider% &7(account id %id%, name %name%)"
 telegram:
   start: "Hi! This is the server authorization bot. Use /link <code>, shown in Minecraft chat when you join, to link your account."
   unknown-command: "Unknown command. Use /link <code>."
@@ -110,3 +119,56 @@ update:
 
 api:
   authentication-denied: "&cYour login was denied by another plugin."
+
+choose:
+  header: "&6&lHow do you want to log in?"
+  telegram: "&b&l[Telegram]"
+  telegram-hover: "&7Link with Telegram"
+  header-confirm: "&6&lConfirm this login with:"
+  header-add: "&6&lWhich login method do you want to add?"
+  telegram-hover-confirm: "&7Confirm in Telegram"
+  telegram-hover-add: "&7Add Telegram"
+  or: " &7or "
+  not-needed: "&cYou don't need to choose right now."
+  unavailable: "&cThat login method is not available right now."
+
+# Vanilla dialog window (only used when ui.vanilla-dialog is true). Lines use & colour codes.
+dialog:
+  back: "&fBack"
+  copy: "&fCopy code"
+  close: "&fClose"
+  choose:
+    title: "&6&lHow do you want to log in?"
+    body:
+      - "&7Choose how to link your game account."
+      - "&7You will log in this way every time you join."
+    body-confirm:
+      - "&7You have two linked login methods."
+      - "&7Choose which one confirms this login."
+    body-add:
+      - "&7Choose the method you want to link to this account."
+      - "&7You will be able to log in with either one."
+    title-confirm: "&6&lConfirm your login"
+    title-add: "&6&lAdd a login method"
+    telegram-tooltip-confirm: "&7Confirm in Telegram"
+    telegram-tooltip-add: "&7Add Telegram"
+    telegram: "&b&lTelegram"
+    telegram-tooltip: "&7Link with Telegram"
+  telegram:
+    title: "&b&lLink with Telegram"
+    body:
+      - "&eOpen the bot &f%bot%"
+      - "&eand send it the command:"
+      - "&a&l/link %code%"
+
+copy:
+  hover: "&7Click to copy"
+
+# /add-auth-method
+addmethod:
+  not-authenticated: "&cLog in first."
+  all-linked: "&eYou already have every login method linked."
+  none-available: "&cNo login method can be added right now."
+  telegram-code: "&eOpen the bot &f%bot% &eand send it &a/link %code% &eto add Telegram as a login method."
+  success-telegram: "&aTelegram was added as a login method."
+  success-provider: "&a%provider% was added as a login method."

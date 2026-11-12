@@ -32,7 +32,7 @@ import java.util.Set;
 
 public class PlayerProtectListener implements Listener {
 
-    private static final Set<String> ALLOWED_COMMANDS = Set.of("/tgcode", "/tgauth");
+    private static final Set<String> ALLOWED_COMMANDS = Set.of("/tgcode", "/tgauth", "/tgchoose");
 
     private final TgAuthPlugin plugin;
 

@@ -195,7 +195,9 @@ public class FastLoginHook {
                 switch (method.getName()) {
                     case "isRegistered": {
                         String playerName = (String) args[0];
-                        return plugin.database().findByUsername(playerName).isPresent();
+                        // "Registered" means linked with ANY method (Telegram or a login provider).
+                        return plugin.database().findByUsername(playerName).isPresent()
+                                || !plugin.database().findExternalsByUsername(playerName).isEmpty();
                     }
                     case "forceLogin": {
                         Player player = (Player) args[0];

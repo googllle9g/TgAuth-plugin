@@ -1,12 +1,15 @@
 package net.millyland.auth.telegram;
 
 import net.millyland.auth.TgAuthPlugin;
+import net.millyland.auth.admin.AdminActions;
 import net.millyland.auth.admin.AdminPinService;
 import net.millyland.auth.storage.LinkedAccount;
 import net.kyori.adventure.text.Component;
 import org.bukkit.BanList;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
+import net.millyland.auth.api.ProxyConfig;
+import org.telegram.telegrambots.bots.DefaultBotOptions;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.TelegramBotsApi;
 import org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery;
@@ -61,15 +64,47 @@ public class TelegramService extends TelegramLongPollingBot {
         }
     }
 
-    public TelegramService(TgAuthPlugin plugin) {
-        super(plugin.cfg().botToken());
+    /** Stops the long-polling session; set by {@link #start()}. */
+    private volatile Runnable sessionStopper;
+
+    /** @param proxy proxy to reach Telegram through, or null for a direct connection */
+    public TelegramService(TgAuthPlugin plugin, ProxyConfig proxy) {
+        super(buildOptions(proxy), plugin.cfg().botToken());
         this.plugin = plugin;
         this.username = plugin.cfg().botUsername();
     }
 
+    private static DefaultBotOptions buildOptions(ProxyConfig proxy) {
+        DefaultBotOptions options = new DefaultBotOptions();
+        if (proxy != null) {
+            options.setProxyHost(proxy.host());
+            options.setProxyPort(proxy.port());
+            options.setProxyType(switch (proxy.type()) {
+                case HTTP -> DefaultBotOptions.ProxyType.HTTP;
+                case SOCKS4 -> DefaultBotOptions.ProxyType.SOCKS4;
+                case SOCKS5 -> DefaultBotOptions.ProxyType.SOCKS5;
+            });
+        }
+        return options;
+    }
+
     public void start() throws TelegramApiException {
         TelegramBotsApi botsApi = new TelegramBotsApi(DefaultBotSession.class);
-        botsApi.registerBot(this);
+        var session = botsApi.registerBot(this);
+        this.sessionStopper = session::stop;
+    }
+
+    /** Stops polling (used when the proxy changes and the bot reconnects, and on disable). Safe to call twice. */
+    public void shutdown() {
+        Runnable stop = sessionStopper;
+        sessionStopper = null;
+        if (stop != null) {
+            try {
+                stop.run();
+            } catch (Throwable t) {
+                plugin.getLogger().fine("Stopping the Telegram session failed: " + t);
+            }
+        }
     }
 
     @Override
@@ -106,46 +141,9 @@ public class TelegramService extends TelegramLongPollingBot {
         // With several linked accounts, the user is an admin if ANY of them has the permission.
         List<UUID> uuids = linkedAll.stream().map(net.millyland.auth.storage.LinkedAccount::uuid).toList();
         String names = String.join(", ", linkedAll.stream().map(net.millyland.auth.storage.LinkedAccount::username).toList());
-
-        java.util.Map<UUID, Boolean> online;
-        try {
-            online = Bukkit.getScheduler().callSyncMethod(plugin, () -> {
-                java.util.Map<UUID, Boolean> result = new java.util.HashMap<>();
-                for (UUID u : uuids) {
-                    Player p = Bukkit.getPlayer(u);
-                    if (p != null) result.put(u, p.hasPermission("tgauth.admin"));
-                }
-                return result;
-            }).get(5, java.util.concurrent.TimeUnit.SECONDS);
-        } catch (Exception e) {
-            return "could not check the permissions of " + names + ": " + e;
-        }
-        if (online.containsValue(true)) return null;
-
-        List<UUID> offline = uuids.stream().filter(u -> !online.containsKey(u)).toList();
-        if (offline.isEmpty()) {
-            return names + " is online but lacks the tgauth.admin permission";
-        }
-
-        if (plugin.luckPermsHook().isPresent()) {
-            for (UUID u : offline) {
-                if (plugin.luckPermsHook().hasPermission(u, "tgauth.admin")) return null;
-            }
-            return names + " (offline) has no tgauth.admin permission in LuckPerms";
-        }
-
-        try {
-            boolean anyOp = Bukkit.getScheduler().callSyncMethod(plugin, () -> {
-                for (UUID u : offline) {
-                    if (Bukkit.getOfflinePlayer(u).isOp()) return true;
-                }
-                return false;
-            }).get(5, java.util.concurrent.TimeUnit.SECONDS);
-            return anyOp ? null
-                    : names + " is offline and not an operator (add the Telegram ID to telegram.admin-ids to be safe)";
-        } catch (Exception e) {
-            return "could not check operator status of " + names + ": " + e;
-        }
+        String reason = plugin.adminActions().adminPermissionReason(uuids, names);
+        return reason != null && reason.endsWith("not an operator")
+                ? reason + " (add the Telegram ID to telegram.admin-ids to be safe)" : reason;
     }
 
     private void handleMessage(Message message) {
@@ -300,17 +298,8 @@ public class TelegramService extends TelegramLongPollingBot {
         } else if (action.startsWith("unpremium:")) {
             String uuidStr = action.substring("unpremium:".length());
             withAccount(uuidStr, a -> {
-                plugin.database().setPremium(a.uuid(), false);
-                boolean fastLoginPresent = plugin.fastLoginHook().isFastLoginPresent();
-                Bukkit.getScheduler().runTask(plugin, () -> {
-                    if (fastLoginPresent) {
-                        try {
-                            Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "unpremium " + a.username());
-                        } catch (Exception e) {
-                            plugin.getLogger().warning("Could not run FastLogin's '/unpremium " + a.username() + "': " + e);
-                        }
-                    }
-                });
+                plugin.adminActions().clearPremium(a.uuid(), a.username());
+                boolean fastLoginPresent = plugin.adminActions().fastLoginPresent();
                 editText(chatId, messageId, "✅ Premium flag cleared" + (fastLoginPresent
                         ? " (also ran FastLogin's /unpremium)." : "."),
                         keyboard(inlineRow(button("« Back", "admin:view:" + uuidStr))));
@@ -319,14 +308,7 @@ public class TelegramService extends TelegramLongPollingBot {
         } else if (action.startsWith("unban:")) {
             String uuidStr = action.substring("unban:".length());
             withAccount(uuidStr, a -> {
-                String custom = plugin.cfg().unbanCommand();
-                Bukkit.getScheduler().runTask(plugin, () -> {
-                    if (!custom.isBlank()) {
-                        dispatchConfiguredCommand(custom, a.username(), null, null);
-                    } else {
-                        Bukkit.getBanList(BanList.Type.NAME).pardon(a.username());
-                    }
-                });
+                plugin.adminActions().unban(a.username());
                 editText(chatId, messageId, "✅ Unbanned " + a.username() + ".",
                         keyboard(inlineRow(button("« Back", "admin:view:" + uuidStr))));
                 notifyAdmins(telegramId, "unbanned " + a.username());
@@ -356,52 +338,36 @@ public class TelegramService extends TelegramLongPollingBot {
     }
 
     private void executeAdminAction(long telegramId, long chatId, PendingAdminAction action, String reason) {
-        Bukkit.getScheduler().runTask(plugin, () -> {
-            switch (action.type()) {
-                case "kick" -> {
-                    String custom = plugin.cfg().kickCommand();
-                    if (!custom.isBlank()) {
-                        boolean ok = dispatchConfiguredCommand(custom, action.playerName(), reason, null);
-                        send(chatId, ok ? "✅ Ran kick command for " + action.playerName() + ": " + reason
-                                : "❌ Kick command failed for " + action.playerName() + " (check console).");
-                        if (ok) notifyAdmins(telegramId, action.playerName() + " kicked: " + reason);
-                        return;
-                    }
-                    Player p = Bukkit.getPlayer(action.uuid());
-                    if (p != null && p.isOnline()) {
-                        p.kick(Component.text(reason));
-                        send(chatId, "✅ Kicked " + action.playerName() + ": " + reason);
-                        notifyAdmins(telegramId, action.playerName() + " kicked: " + reason);
-                    } else {
-                        send(chatId, "⚠ " + action.playerName() + " is not online - could not kick.");
-                    }
+        plugin.adminActions().kick(action.uuid(), action.playerName(), reason).thenAccept(r -> {
+            switch (r.outcome()) {
+                case DONE -> {
+                    send(chatId, r.viaCommand() ? "✅ Ran kick command for " + action.playerName() + ": " + reason
+                            : "✅ Kicked " + action.playerName() + ": " + reason);
+                    notifyAdmins(telegramId, action.playerName() + " kicked: " + reason);
                 }
-                default -> {
-                }
+                case NOT_ONLINE -> send(chatId, "⚠ " + action.playerName() + " is not online - could not kick.");
+                default -> send(chatId, "❌ Kick command failed for " + action.playerName() + " (check console).");
             }
         });
     }
 
-    private boolean dispatchConfiguredCommand(String template, String player, String reason, String duration) {
-        String cmd = template
-                .replace("%player%", player)
-                .replace("%reason%", reason == null ? "" : reason)
-                .replace("%duration%", duration == null ? "" : duration);
-        try {
-            return Bukkit.dispatchCommand(Bukkit.getConsoleSender(), cmd);
-        } catch (Exception e) {
-            plugin.getLogger().warning("Configured admin command '" + cmd + "' threw an error: " + e);
-            return false;
-        }
-    }
-
-    /** Notifies every configured/eligible admin in Telegram about an action taken in the admin
-     *  panel, except the admin who performed it. */
+    /**
+     * Notifies every configured/eligible admin in Telegram about an action taken in the admin panel, except the
+     * admin who performed it.
+     */
     private void notifyAdmins(long actingTelegramId, String message) {
         String adminName = plugin.database().findByTelegramId(actingTelegramId)
                 .map(net.millyland.auth.storage.LinkedAccount::username)
                 .orElse("Telegram admin (" + actingTelegramId + ")");
-        String text = "[TgAuth] " + adminName + " " + message;
+        notifyAdmins(adminName, actingTelegramId, message);
+    }
+
+    /**
+     * Same, for an action taken somewhere else (the admin panel of an addon): {@code actor} is shown as the
+     * acting admin and nobody is excluded.
+     */
+    public void notifyAdmins(String actor, long excludeTelegramId, String message) {
+        String text = "[TgAuth] " + actor + " " + message;
 
         java.util.Set<Long> recipients = new java.util.HashSet<>(plugin.cfg().adminTelegramIds());
         for (Player p : Bukkit.getOnlinePlayers()) {
@@ -410,112 +376,61 @@ public class TelegramService extends TelegramLongPollingBot {
             }
         }
         for (long id : recipients) {
-            if (id != actingTelegramId) {
+            if (id != excludeTelegramId) {
                 send(id, text);
             }
         }
     }
 
-    private static final long DURATION_PERMANENT = 0L;
-    private static final long DURATION_INVALID = -1L;
-
-    private long parseDuration(String input) {
-        String s = input.trim().toLowerCase();
-        if (s.equals("p") || s.equals("perm") || s.equals("permanent")) return DURATION_PERMANENT;
-        var m = java.util.regex.Pattern.compile("^(\\d+)([smhdw])$").matcher(s);
-        if (!m.matches()) return DURATION_INVALID;
-        long amount = Long.parseLong(m.group(1));
-        long unit = switch (m.group(2)) {
-            case "s" -> 1000L;
-            case "m" -> 60_000L;
-            case "h" -> 3_600_000L;
-            case "d" -> 86_400_000L;
-            case "w" -> 604_800_000L;
-            default -> -1L;
-        };
-        long total = amount * unit;
-        return total <= 0 ? DURATION_INVALID : total;
-    }
-
     private void executeBan(long telegramId, long chatId, PendingAdminAction action, String durationInput) {
-        long parsed = parseDuration(durationInput);
-        if (parsed == DURATION_INVALID) {
+        if (AdminActions.parseDuration(durationInput) == AdminActions.INVALID) {
             awaitingReasonInput.put(telegramId, action);
             send(chatId, "❌ Invalid duration '" + durationInput + "'. Use e.g. 1s, 5m, 2h, 7d, or 'p' for permanent.",
                     keyboard(inlineRow(button("Cancel", "admin:cancelreason:" + action.uuid()))));
             return;
         }
-
-        boolean permanent = parsed == DURATION_PERMANENT;
-
-        Bukkit.getScheduler().runTask(plugin, () -> {
-            String custom = permanent ? plugin.cfg().banCommand() : plugin.cfg().tempbanCommand();
-            if (!custom.isBlank()) {
-                boolean ok = dispatchConfiguredCommand(custom, action.playerName(), action.reason(), durationInput);
-                send(chatId, ok ? "✅ Ran " + (permanent ? "ban" : "tempban") + " command for "
-                                + action.playerName() + ": " + action.reason()
-                        : "❌ " + (permanent ? "Ban" : "Tempban") + " command failed for " + action.playerName()
-                                + " (check console).");
-                if (ok) {
-                    notifyAdmins(telegramId, action.playerName() + " banned "
-                            + (permanent ? "permanently" : "for " + durationInput) + ": " + action.reason());
+        boolean permanent = AdminActions.parseDuration(durationInput) == AdminActions.PERMANENT;
+        plugin.adminActions().ban(action.uuid(), action.playerName(), action.reason(), durationInput).thenAccept(r -> {
+            String what = permanent ? "permanently" : "for " + durationInput;
+            if (r.isDone()) {
+                if (r.viaCommand()) {
+                    send(chatId, "✅ Ran " + (permanent ? "ban" : "tempban") + " command for "
+                            + action.playerName() + ": " + action.reason());
+                } else {
+                    send(chatId, "✅ Banned " + action.playerName() + " "
+                            + (permanent ? "permanently" : "until " + java.util.Date.from(r.expiresAt()))
+                            + ": " + action.reason());
                 }
-                return;
+                notifyAdmins(telegramId, action.playerName() + " banned " + what + ": " + action.reason());
+            } else {
+                send(chatId, "❌ " + (permanent ? "Ban" : "Tempban") + " command failed for "
+                        + action.playerName() + " (check console).");
             }
-
-            java.util.Date expiry = permanent ? null : new java.util.Date(System.currentTimeMillis() + parsed);
-            Bukkit.getBanList(BanList.Type.NAME).addBan(action.playerName(), action.reason(), expiry, null);
-            Player p = Bukkit.getPlayer(action.uuid());
-            if (p != null && p.isOnline()) {
-                p.kick(Component.text("Banned: " + action.reason()));
-            }
-            String durationText = permanent ? "permanently" : "until " + expiry;
-            send(chatId, "✅ Banned " + action.playerName() + " " + durationText + ": " + action.reason());
-            notifyAdmins(telegramId, action.playerName() + " banned "
-                    + (permanent ? "permanently" : "for " + durationInput) + ": " + action.reason());
         });
     }
 
     private void executeWarn(long telegramId, long chatId, PendingAdminAction action, String durationInput) {
-        long parsed = parseDuration(durationInput);
-        if (parsed == DURATION_INVALID) {
+        if (AdminActions.parseDuration(durationInput) == AdminActions.INVALID) {
             awaitingReasonInput.put(telegramId, action);
             send(chatId, "❌ Invalid duration '" + durationInput + "'. Use e.g. 1s, 5m, 2h, 7d, or 'p' for no expiry.",
                     keyboard(inlineRow(button("Cancel", "admin:cancelreason:" + action.uuid()))));
             return;
         }
-
-        boolean permanent = parsed == DURATION_PERMANENT;
-
-        Bukkit.getScheduler().runTask(plugin, () -> {
-            String custom = permanent ? plugin.cfg().warnCommand() : plugin.cfg().tempwarnCommand();
-            if (!custom.isBlank()) {
-                boolean ok = dispatchConfiguredCommand(custom, action.playerName(), action.reason(), durationInput);
-                send(chatId, ok ? "✅ Ran " + (permanent ? "warn" : "tempwarn") + " command for "
-                                + action.playerName() + ": " + action.reason()
-                        : "❌ " + (permanent ? "Warn" : "Tempwarn") + " command failed for " + action.playerName()
-                                + " (check console).");
-                if (ok) {
-                    notifyAdmins(telegramId, action.playerName() + " warned "
-                            + (permanent ? "" : "for " + durationInput + " ") + ": " + action.reason());
-                }
-                return;
+        boolean permanent = AdminActions.parseDuration(durationInput) == AdminActions.PERMANENT;
+        plugin.adminActions().warn(action.uuid(), action.playerName(), action.reason(), durationInput).thenAccept(r -> {
+            switch (r.outcome()) {
+                case DONE -> send(chatId, r.viaCommand()
+                        ? "✅ Ran " + (permanent ? "warn" : "tempwarn") + " command for " + action.playerName()
+                                + ": " + action.reason()
+                        : "✅ Warned " + action.playerName() + ": " + action.reason());
+                case NOT_ONLINE -> send(chatId, "⚠ " + action.playerName() + " is not online - could not deliver warning.");
+                default -> send(chatId, "❌ " + (permanent ? "Warn" : "Tempwarn") + " command failed for "
+                        + action.playerName() + " (check console).");
             }
-
-            // Built-in fallback has no persistent warn storage/expiry of its own - the duration
-            // is only noted in the message text for the player's/admin's information, it isn't
-            // actually enforced. Configure tempwarn-command above for real duration enforcement
-            // via a dedicated punishment plugin.
-            Player p = Bukkit.getPlayer(action.uuid());
-            String durationNote = permanent ? "" : " (expires in " + durationInput + ")";
-            if (p != null && p.isOnline()) {
-                p.sendMessage(Component.text("Warning: " + action.reason() + durationNote));
-                send(chatId, "✅ Warned " + action.playerName() + ": " + action.reason());
-            } else {
-                send(chatId, "⚠ " + action.playerName() + " is not online - could not deliver warning.");
+            if (r.isDone() || r.outcome() == net.millyland.auth.api.AdminResult.Outcome.NOT_ONLINE) {
+                notifyAdmins(telegramId, action.playerName() + " warned"
+                        + (permanent ? "" : " for " + durationInput) + ": " + action.reason());
             }
-            notifyAdmins(telegramId, action.playerName() + " warned"
-                    + (permanent ? "" : " for " + durationInput) + ": " + action.reason());
         });
     }
 

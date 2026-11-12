@@ -12,6 +12,8 @@ public enum AuthMethod {
     PREMIUM,
     /** The player has the {@code tgauth.bypass} permission. */
     BYPASS,
-    /** Another plugin authenticated the player through {@link TgAuthAPI#authenticate}. */
-    EXTERNAL
+    /** First-time login through a {@link LoginProvider}: the player proved ownership of an external account. */
+    EXTERNAL_LINK,
+    /** The linked external account (a {@link LoginProvider}) confirmed the login. */
+    EXTERNAL_CONFIRM
 }

@@ -51,6 +51,7 @@ public class TgAuthCommand implements CommandExecutor, TabCompleter {
             case "reload" -> {
                 plugin.cfg().load();
                 plugin.lang().load();
+                plugin.refreshProxy(); // reconnects the bot if proxy.* in config.yml changed
                 sender.sendMessage(plugin.lang().pget("commands.reload-success"));
             }
             case "unlink" -> {
@@ -59,9 +60,13 @@ public class TgAuthCommand implements CommandExecutor, TabCompleter {
                     return true;
                 }
 
+                // a player may have a Telegram link and a provider link (Discord, ...): remove both
                 Optional<LinkedAccount> byName = plugin.database().findByUsername(args[1]);
                 boolean removed = byName.isPresent() && plugin.database().unlink(byName.get().uuid());
                 if (removed) plugin.api().fireUnlinked(byName.get());
+                for (var external : plugin.database().findExternalsByUsername(args[1])) {
+                    if (plugin.database().unlinkExternal(external.uuid(), external.provider())) removed = true;
+                }
                 sender.sendMessage(removed
                         ? plugin.lang().pget("commands.unlink-success", "%player%", args[1])
                         : plugin.lang().pget("commands.unlink-not-linked"));
@@ -96,23 +101,30 @@ public class TgAuthCommand implements CommandExecutor, TabCompleter {
                 }
 
                 Optional<LinkedAccount> acc = plugin.database().findByUsername(args[1]);
-                if (acc.isEmpty()) {
+                var ext = plugin.database().findExternalsByUsername(args[1]);
+                if (acc.isEmpty() && ext.isEmpty()) {
                     sender.sendMessage(plugin.lang().pget("commands.userinfo-not-linked", "%player%", args[1]));
                     return true;
                 }
-                LinkedAccount a = acc.get();
-                String tgUsername = (a.telegramUsername() == null || a.telegramUsername().isBlank())
-                        ? plugin.lang().get("commands.userinfo-username-unset")
-                        : "@" + a.telegramUsername();
-                String premiumText = a.premium()
-                        ? plugin.lang().get("commands.userinfo-premium-yes")
-                        : plugin.lang().get("commands.userinfo-premium-no");
-
                 sender.sendMessage(plugin.lang().pget("commands.userinfo-header", "%player%", args[1]));
-                sender.sendMessage(plugin.lang().pget("commands.userinfo-telegram-id",
-                        "%telegram%", String.valueOf(a.telegramId())));
-                sender.sendMessage(plugin.lang().pget("commands.userinfo-telegram-username", "%tguser%", tgUsername));
-                sender.sendMessage(plugin.lang().pget("commands.userinfo-premium", "%premium%", premiumText));
+                if (acc.isPresent()) {
+                    LinkedAccount a = acc.get();
+                    String tgUsername = (a.telegramUsername() == null || a.telegramUsername().isBlank())
+                            ? plugin.lang().get("commands.userinfo-username-unset")
+                            : "@" + a.telegramUsername();
+                    sender.sendMessage(plugin.lang().pget("commands.userinfo-telegram-id",
+                            "%telegram%", String.valueOf(a.telegramId())));
+                    sender.sendMessage(plugin.lang().pget("commands.userinfo-telegram-username", "%tguser%", tgUsername));
+                }
+                for (var e : ext) {
+                    sender.sendMessage(plugin.lang().pget("commands.userinfo-provider", "%provider%", e.provider(),
+                            "%id%", e.externalId(), "%name%", e.externalName() == null ? "-" : e.externalName()));
+                }
+                boolean premium = acc.map(LinkedAccount::premium).orElse(false)
+                        || ext.stream().anyMatch(e -> e.premium());
+                sender.sendMessage(plugin.lang().pget("commands.userinfo-premium", "%premium%",
+                        premium ? plugin.lang().get("commands.userinfo-premium-yes")
+                                : plugin.lang().get("commands.userinfo-premium-no")));
             }
             case "fastlogin" -> {
                 var hook = plugin.fastLoginHook();
@@ -197,19 +209,24 @@ public class TgAuthCommand implements CommandExecutor, TabCompleter {
                     } catch (NumberFormatException ignored) {
                     }
                 }
-                if (telegramId == null) {
+                // addon panels (Discord, ...) keep their own PIN per external account of the player
+                var externals = plugin.database().findExternalsByUsername(args[1]);
+                if (telegramId == null && externals.isEmpty()) {
                     sender.sendMessage(plugin.lang().pget("commands.userinfo-not-linked", "%player%", args[1]));
                     return true;
                 }
 
-                boolean existed = plugin.adminPin().resetPin(telegramId);
+                boolean existed = telegramId != null && plugin.adminPin().resetPin(telegramId);
+                for (var ext : externals) {
+                    existed |= plugin.adminPin().resetPin(ext.provider(), ext.externalId());
+                }
                 if (!existed) {
                     sender.sendMessage(plugin.lang().pget("commands.pinreset-nothing", "%player%", args[1]));
                     return true;
                 }
                 sender.sendMessage(plugin.lang().pget("commands.pinreset-success", "%player%", args[1]));
                 plugin.getLogger().info("Admin panel PIN of " + args[1] + " (Telegram ID " + telegramId
-                        + ") was reset by " + sender.getName() + ".");
+                        + ", " + externals.size() + " provider link(s)) was reset by " + sender.getName() + ".");
                 plugin.adminPin().broadcastToAdmins(plugin.lang().rawGet("pin.reset-notify-telegram",
                         "%player%", args[1], "%by%", sender.getName()), null);
             }

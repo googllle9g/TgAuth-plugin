@@ -89,6 +89,8 @@ public class Database {
     private volatile Type type = Type.SQLITE;
     private volatile String linkedTable = "linked_accounts";
     private volatile String pinsTable = "admin_pins";
+    private volatile String externalTable = "external_links";
+    private volatile String extPinsTable = "admin_pins_ext";
 
     public Database(TgAuthPlugin plugin) {
         this.plugin = plugin;
@@ -107,6 +109,8 @@ public class Database {
         if (configured == Type.SQLITE) {
             this.linkedTable = "linked_accounts";
             this.pinsTable = "admin_pins";
+            this.externalTable = "external_links";
+            this.extPinsTable = "admin_pins_ext";
             this.dataSource = createSqlitePool();
         } else {
             String prefix = plugin.cfg().mysqlTablePrefix();
@@ -116,6 +120,8 @@ public class Database {
             }
             this.linkedTable = prefix + "linked_accounts";
             this.pinsTable = prefix + "admin_pins";
+            this.externalTable = prefix + "external_links";
+            this.extPinsTable = prefix + "admin_pins_ext";
             this.dataSource = createRemotePool(configured);
         }
 
@@ -263,7 +269,8 @@ public class Database {
     // ------------------------------------------------------------------ schema
 
     private String sql(String template) {
-        return template.replace("{linked}", linkedTable).replace("{pins}", pinsTable);
+        return template.replace("{linked}", linkedTable).replace("{pins}", pinsTable)
+                .replace("{external}", externalTable).replace("{extpins}", extPinsTable);
     }
 
     private void createTables(Connection c) throws SQLException {
@@ -278,12 +285,38 @@ public class Database {
                     )
                 """));
                 st.execute(sql("""
+                    CREATE TABLE IF NOT EXISTS {external} (
+                        uuid TEXT NOT NULL,
+                        provider TEXT NOT NULL,
+                        external_id TEXT NOT NULL,
+                        external_name TEXT,
+                        username TEXT,
+                        linked_at INTEGER NOT NULL,
+                        premium INTEGER NOT NULL DEFAULT 0,
+                        last_confirmed_ip TEXT,
+                        last_confirmed_at INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY (uuid, provider)
+                    )
+                """));
+                st.execute(sql("""
                     CREATE TABLE IF NOT EXISTS {pins} (
                         telegram_id INTEGER PRIMARY KEY,
                         salt TEXT NOT NULL,
                         pin_hash TEXT NOT NULL,
                         iterations INTEGER NOT NULL,
                         set_at INTEGER NOT NULL
+                    )
+                """));
+                // Admin-panel PINs of addon panels (for example Discord): one per (namespace, subject).
+                st.execute(sql("""
+                    CREATE TABLE IF NOT EXISTS {extpins} (
+                        namespace TEXT NOT NULL,
+                        subject TEXT NOT NULL,
+                        salt TEXT NOT NULL,
+                        pin_hash TEXT NOT NULL,
+                        iterations INTEGER NOT NULL,
+                        set_at INTEGER NOT NULL,
+                        PRIMARY KEY (namespace, subject)
                     )
                 """));
             } else {
@@ -303,6 +336,21 @@ public class Database {
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """));
                 st.execute(sql("""
+                    CREATE TABLE IF NOT EXISTS {external} (
+                        uuid VARCHAR(36) NOT NULL,
+                        provider VARCHAR(24) NOT NULL,
+                        external_id VARCHAR(64) NOT NULL,
+                        external_name VARCHAR(64) NULL,
+                        username VARCHAR(64) NULL,
+                        linked_at BIGINT NOT NULL,
+                        premium TINYINT NOT NULL DEFAULT 0,
+                        last_confirmed_ip VARCHAR(64) NULL,
+                        last_confirmed_at BIGINT NOT NULL DEFAULT 0,
+                        PRIMARY KEY (uuid, provider),
+                        KEY idx_external (provider, external_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """));
+                st.execute(sql("""
                     CREATE TABLE IF NOT EXISTS {pins} (
                         telegram_id BIGINT NOT NULL,
                         salt VARCHAR(64) NOT NULL,
@@ -310,6 +358,17 @@ public class Database {
                         iterations INT NOT NULL,
                         set_at BIGINT NOT NULL,
                         PRIMARY KEY (telegram_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """));
+                st.execute(sql("""
+                    CREATE TABLE IF NOT EXISTS {extpins} (
+                        namespace VARCHAR(24) NOT NULL,
+                        subject VARCHAR(64) NOT NULL,
+                        salt VARCHAR(64) NOT NULL,
+                        pin_hash VARCHAR(128) NOT NULL,
+                        iterations INT NOT NULL,
+                        set_at BIGINT NOT NULL,
+                        PRIMARY KEY (namespace, subject)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """));
             }
@@ -554,28 +613,34 @@ public class Database {
     }
 
     public boolean setPremium(UUID uuid, boolean premium) {
-        String sql = sql("UPDATE {linked} SET premium = ? WHERE uuid = ?");
-        try (Connection c = conn(); PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setInt(1, premium ? 1 : 0);
-            ps.setString(2, uuid.toString());
-            return ps.executeUpdate() > 0;
-        } catch (SQLException e) {
-            plugin.getLogger().warning("DB error (setPremium): " + e.getMessage());
-            return false;
+        boolean changed = false;
+        for (String table : new String[]{linkedTable, externalTable}) {
+            String sql = "UPDATE " + table + " SET premium = ? WHERE uuid = ?";
+            try (Connection c = conn(); PreparedStatement ps = c.prepareStatement(sql)) {
+                ps.setInt(1, premium ? 1 : 0);
+                ps.setString(2, uuid.toString());
+                changed |= ps.executeUpdate() > 0;
+            } catch (SQLException e) {
+                plugin.getLogger().warning("DB error (setPremium): " + e.getMessage());
+            }
         }
+        return changed;
     }
 
     public boolean migrateUuid(UUID oldUuid, UUID newUuid, String newUsername) {
-        String sql = sql("UPDATE {linked} SET uuid = ?, username = ? WHERE uuid = ?");
-        try (Connection c = conn(); PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, newUuid.toString());
-            ps.setString(2, newUsername);
-            ps.setString(3, oldUuid.toString());
-            return ps.executeUpdate() > 0;
-        } catch (SQLException e) {
-            plugin.getLogger().warning("DB error (migrateUuid): " + e.getMessage());
-            return false;
+        boolean changed = false;
+        for (String table : new String[]{linkedTable, externalTable}) {
+            String sql = "UPDATE " + table + " SET uuid = ?, username = ? WHERE uuid = ?";
+            try (Connection c = conn(); PreparedStatement ps = c.prepareStatement(sql)) {
+                ps.setString(1, newUuid.toString());
+                ps.setString(2, newUsername);
+                ps.setString(3, oldUuid.toString());
+                changed |= ps.executeUpdate() > 0;
+            } catch (SQLException e) {
+                plugin.getLogger().warning("DB error (migrateUuid): " + e.getMessage());
+            }
         }
+        return changed;
     }
 
     private LinkedAccount map(ResultSet rs) throws SQLException {
@@ -616,56 +681,199 @@ public class Database {
         return 0;
     }
 
+    /** The trusted-IP bookkeeping lives in both account tables (Telegram links and provider links). */
+    private String[] accountTables() {
+        return new String[]{linkedTable, externalTable};
+    }
+
     public boolean matchesRecentIp(UUID uuid, String ip, int cooldownSeconds) {
-        String sql = sql("SELECT last_confirmed_ip, last_confirmed_at FROM {linked} WHERE uuid = ?");
-        try (Connection c = conn(); PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, uuid.toString());
-            try (ResultSet rs = ps.executeQuery()) {
-                if (!rs.next()) return false;
-                String storedIp = rs.getString("last_confirmed_ip");
-                long storedAt = rs.getLong("last_confirmed_at");
-                if (storedIp == null || !storedIp.equals(ip)) return false;
-                return System.currentTimeMillis() - storedAt <= cooldownSeconds * 1000L;
+        for (String table : accountTables()) {
+            String sql = "SELECT last_confirmed_ip, last_confirmed_at FROM " + table + " WHERE uuid = ?";
+            try (Connection c = conn(); PreparedStatement ps = c.prepareStatement(sql)) {
+                ps.setString(1, uuid.toString());
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next()) continue;
+                    String storedIp = rs.getString("last_confirmed_ip");
+                    long storedAt = rs.getLong("last_confirmed_at");
+                    if (storedIp == null || !storedIp.equals(ip)) return false;
+                    return System.currentTimeMillis() - storedAt <= cooldownSeconds * 1000L;
+                }
+            } catch (SQLException e) {
+                plugin.getLogger().warning("DB error (matchesRecentIp): " + e.getMessage());
+                return false;
             }
-        } catch (SQLException e) {
-            plugin.getLogger().warning("DB error (matchesRecentIp): " + e.getMessage());
-            return false;
         }
+        return false;
     }
 
     public void recordConfirmedIp(UUID uuid, String ip) {
-        String sql = sql("UPDATE {linked} SET last_confirmed_ip = ?, last_confirmed_at = ? WHERE uuid = ?");
-        try (Connection c = conn(); PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, ip);
-            ps.setLong(2, System.currentTimeMillis());
-            ps.setString(3, uuid.toString());
-            ps.executeUpdate();
-        } catch (SQLException e) {
-            plugin.getLogger().warning("DB error (recordConfirmedIp): " + e.getMessage());
+        for (String table : accountTables()) {
+            String sql = "UPDATE " + table + " SET last_confirmed_ip = ?, last_confirmed_at = ? WHERE uuid = ?";
+            try (Connection c = conn(); PreparedStatement ps = c.prepareStatement(sql)) {
+                ps.setString(1, ip);
+                ps.setLong(2, System.currentTimeMillis());
+                ps.setString(3, uuid.toString());
+                ps.executeUpdate();
+            } catch (SQLException e) {
+                plugin.getLogger().warning("DB error (recordConfirmedIp): " + e.getMessage());
+            }
         }
     }
 
     public void revokeTrustedIpIfUsedByOtherAccount(UUID excludeUuid, String ip) {
-        String sql = sql("UPDATE {linked} SET last_confirmed_ip = NULL, last_confirmed_at = 0 "
-                + "WHERE last_confirmed_ip = ? AND uuid != ?");
-        try (Connection c = conn(); PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, ip);
-            ps.setString(2, excludeUuid.toString());
-            ps.executeUpdate();
-        } catch (SQLException e) {
-            plugin.getLogger().warning("DB error (revokeTrustedIpIfUsedByOtherAccount): " + e.getMessage());
+        for (String table : accountTables()) {
+            String sql = "UPDATE " + table + " SET last_confirmed_ip = NULL, last_confirmed_at = 0 "
+                    + "WHERE last_confirmed_ip = ? AND uuid != ?";
+            try (Connection c = conn(); PreparedStatement ps = c.prepareStatement(sql)) {
+                ps.setString(1, ip);
+                ps.setString(2, excludeUuid.toString());
+                ps.executeUpdate();
+            } catch (SQLException e) {
+                plugin.getLogger().warning("DB error (revokeTrustedIpIfUsedByOtherAccount): " + e.getMessage());
+            }
         }
     }
 
     public void revokeTrustedIpIfMismatched(UUID uuid, String currentIp) {
-        String sql = sql("UPDATE {linked} SET last_confirmed_ip = NULL, last_confirmed_at = 0 "
-                + "WHERE uuid = ? AND last_confirmed_ip IS NOT NULL AND last_confirmed_ip != ?");
+        for (String table : accountTables()) {
+            String sql = "UPDATE " + table + " SET last_confirmed_ip = NULL, last_confirmed_at = 0 "
+                    + "WHERE uuid = ? AND last_confirmed_ip IS NOT NULL AND last_confirmed_ip != ?";
+            try (Connection c = conn(); PreparedStatement ps = c.prepareStatement(sql)) {
+                ps.setString(1, uuid.toString());
+                ps.setString(2, currentIp);
+                ps.executeUpdate();
+            } catch (SQLException e) {
+                plugin.getLogger().warning("DB error (revokeTrustedIpIfMismatched): " + e.getMessage());
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ provider (external) links
+
+    private static final String EXTERNAL_COLUMNS =
+            "uuid, provider, external_id, external_name, username, linked_at, premium";
+
+    private ExternalLink mapExternal(ResultSet rs) throws SQLException {
+        return new ExternalLink(UUID.fromString(rs.getString("uuid")), rs.getString("provider"),
+                rs.getString("external_id"), rs.getString("external_name"), rs.getString("username"),
+                rs.getLong("linked_at"), rs.getInt("premium") != 0);
+    }
+
+    /** Every provider link of a game account (at most one per provider), ordered by provider id. */
+    public List<ExternalLink> findExternalsByUuid(UUID uuid) {
+        String sql = sql("SELECT " + EXTERNAL_COLUMNS + " FROM {external} WHERE uuid = ? ORDER BY provider ASC");
+        List<ExternalLink> out = new ArrayList<>();
         try (Connection c = conn(); PreparedStatement ps = c.prepareStatement(sql)) {
             ps.setString(1, uuid.toString());
-            ps.setString(2, currentIp);
-            ps.executeUpdate();
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) out.add(mapExternal(rs));
+            }
         } catch (SQLException e) {
-            plugin.getLogger().warning("DB error (revokeTrustedIpIfMismatched): " + e.getMessage());
+            plugin.getLogger().warning("DB error (findExternalsByUuid): " + e.getMessage());
+        }
+        return out;
+    }
+
+    public Optional<ExternalLink> findExternal(UUID uuid, String provider) {
+        String sql = sql("SELECT " + EXTERNAL_COLUMNS + " FROM {external} WHERE uuid = ? AND provider = ?");
+        try (Connection c = conn(); PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, uuid.toString());
+            ps.setString(2, provider);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return Optional.of(mapExternal(rs));
+            }
+        } catch (SQLException e) {
+            plugin.getLogger().warning("DB error (findExternal): " + e.getMessage());
+        }
+        return Optional.empty();
+    }
+
+    public List<ExternalLink> findExternalsByUsername(String username) {
+        String sql = sql("SELECT " + EXTERNAL_COLUMNS
+                + " FROM {external} WHERE LOWER(username) = LOWER(?) ORDER BY provider ASC");
+        List<ExternalLink> out = new ArrayList<>();
+        try (Connection c = conn(); PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, username);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) out.add(mapExternal(rs));
+            }
+        } catch (SQLException e) {
+            plugin.getLogger().warning("DB error (findExternalsByUsername): " + e.getMessage());
+        }
+        return out;
+    }
+
+    public List<ExternalLink> findAllExternal(String provider, String externalId) {
+        String sql = sql("SELECT " + EXTERNAL_COLUMNS
+                + " FROM {external} WHERE provider = ? AND external_id = ? ORDER BY linked_at ASC, uuid ASC");
+        List<ExternalLink> out = new ArrayList<>();
+        try (Connection c = conn(); PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, provider);
+            ps.setString(2, externalId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) out.add(mapExternal(rs));
+            }
+        } catch (SQLException e) {
+            plugin.getLogger().warning("DB error (findAllExternal): " + e.getMessage());
+        }
+        return out;
+    }
+
+    /** @return how many game accounts are linked to this external account, or Integer.MAX_VALUE if the DB failed */
+    public int countExternal(String provider, String externalId) {
+        String sql = sql("SELECT COUNT(*) FROM {external} WHERE provider = ? AND external_id = ?");
+        try (Connection c = conn(); PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, provider);
+            ps.setString(2, externalId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return rs.getInt(1);
+            }
+        } catch (SQLException e) {
+            plugin.getLogger().warning("DB error (countExternal): " + e.getMessage());
+        }
+        return Integer.MAX_VALUE; // fail closed
+    }
+
+    public boolean linkExternal(UUID uuid, String provider, String externalId, String externalName, String username) {
+        String sql = sql("INSERT INTO {external} (uuid, provider, external_id, external_name, username, linked_at, premium) "
+                + "VALUES (?, ?, ?, ?, ?, ?, 0)");
+        try (Connection c = conn(); PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, uuid.toString());
+            ps.setString(2, provider);
+            ps.setString(3, externalId);
+            ps.setString(4, externalName);
+            ps.setString(5, username);
+            ps.setLong(6, System.currentTimeMillis());
+            ps.executeUpdate();
+            return true;
+        } catch (SQLException e) {
+            plugin.getLogger().warning("DB error (linkExternal): " + e.getMessage());
+            return false;
+        }
+    }
+
+    /** Removes every provider link of the account. */
+    public boolean unlinkExternal(UUID uuid) {
+        String sql = sql("DELETE FROM {external} WHERE uuid = ?");
+        try (Connection c = conn(); PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, uuid.toString());
+            return ps.executeUpdate() > 0;
+        } catch (SQLException e) {
+            plugin.getLogger().warning("DB error (unlinkExternal): " + e.getMessage());
+            return false;
+        }
+    }
+
+    /** Removes one provider link of the account. */
+    public boolean unlinkExternal(UUID uuid, String provider) {
+        String sql = sql("DELETE FROM {external} WHERE uuid = ? AND provider = ?");
+        try (Connection c = conn(); PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, uuid.toString());
+            ps.setString(2, provider);
+            return ps.executeUpdate() > 0;
+        } catch (SQLException e) {
+            plugin.getLogger().warning("DB error (unlinkExternal): " + e.getMessage());
+            return false;
         }
     }
 
@@ -719,6 +927,58 @@ public class Database {
             return ps.executeUpdate() > 0;
         } catch (SQLException e) {
             plugin.getLogger().warning("DB error (deleteAdminPin): " + e.getMessage());
+            return false;
+        }
+    }
+
+    /** PIN of an addon admin panel; {@link AdminPinRecord#telegramId()} is 0 for these. */
+    public Optional<AdminPinRecord> findExtPin(String namespace, String subject) {
+        String sql = sql("SELECT salt, pin_hash, iterations, set_at FROM {extpins} WHERE namespace = ? AND subject = ?");
+        try (Connection c = conn(); PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, namespace);
+            ps.setString(2, subject);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return Optional.of(new AdminPinRecord(0L, rs.getString("salt"), rs.getString("pin_hash"),
+                            rs.getInt("iterations"), rs.getLong("set_at")));
+                }
+            }
+        } catch (SQLException e) {
+            plugin.getLogger().warning("DB error (findExtPin): " + e.getMessage());
+        }
+        return Optional.empty();
+    }
+
+    public boolean saveExtPin(String namespace, String subject, String salt, String hash, int iterations) {
+        String insert = "INSERT INTO {extpins} (namespace, subject, salt, pin_hash, iterations, set_at) VALUES (?, ?, ?, ?, ?, ?) ";
+        String sql = sql(type == Type.SQLITE
+                ? insert + "ON CONFLICT(namespace, subject) DO UPDATE SET salt = excluded.salt, pin_hash = excluded.pin_hash, "
+                        + "iterations = excluded.iterations, set_at = excluded.set_at"
+                : insert + "ON DUPLICATE KEY UPDATE salt = VALUES(salt), pin_hash = VALUES(pin_hash), "
+                        + "iterations = VALUES(iterations), set_at = VALUES(set_at)");
+        try (Connection c = conn(); PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, namespace);
+            ps.setString(2, subject);
+            ps.setString(3, salt);
+            ps.setString(4, hash);
+            ps.setInt(5, iterations);
+            ps.setLong(6, System.currentTimeMillis());
+            ps.executeUpdate();
+            return true;
+        } catch (SQLException e) {
+            plugin.getLogger().warning("DB error (saveExtPin): " + e.getMessage());
+            return false;
+        }
+    }
+
+    public boolean deleteExtPin(String namespace, String subject) {
+        String sql = sql("DELETE FROM {extpins} WHERE namespace = ? AND subject = ?");
+        try (Connection c = conn(); PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, namespace);
+            ps.setString(2, subject);
+            return ps.executeUpdate() > 0;
+        } catch (SQLException e) {
+            plugin.getLogger().warning("DB error (deleteExtPin): " + e.getMessage());
             return false;
         }
     }

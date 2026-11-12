@@ -9,6 +9,10 @@ join:
   already-authenticated: "&aВы уже авторизованы."
   trusted-ip-skip: "&aВход подтверждён автоматически (доверенный IP)."
 
+  provider-unavailable: "&cВход через %provider% сейчас недоступен. Попробуйте позже."
+  need-confirm-external: "&eЗапрос на подтверждение входа отправлен в ваш аккаунт &f%provider%&e. Подтвердите его."
+  no-method: "&cСейчас нет доступного способа входа (вход через Telegram выключен, другой способ не готов). Попробуйте позже."
+  telegram-disabled: "&cВход через Telegram на этом сервере выключен, а ваш аккаунт привязан только к Telegram. Попросите администратора сбросить привязку (/tgauth unlink)."
 link:
   success-ingame: "&aВаш аккаунт успешно привязан к Telegram! Добро пожаловать."
   success-telegram: "✅ Аккаунт %player% успешно привязан к вашему Telegram."
@@ -19,6 +23,8 @@ link:
   already-linked-player: "❌ Этот игровой аккаунт уже привязан к другому Telegram."
   code-expired-kick: "&cВремя на привязку истекло. Подключитесь заново."
 
+  success-external: "&aВаш аккаунт привязан к %provider%! Добро пожаловать."
+  telegram-disabled: "Вход через Telegram на этом сервере выключен."
 confirm:
   message: "🔐 Подтвердите вход в игру\nИгрок: %player%\nIP: %ip%\n\nЕсли это были не вы — нажмите «Отклонить»."
   button-confirm: "✅ Подтвердить"
@@ -29,6 +35,8 @@ confirm:
   rejected-kick: "&cВход отклонён через Telegram."
   timeout-kick: "&cВремя на подтверждение входа истекло."
 
+  confirmed-external: "&aВход подтверждён через %provider%. Добро пожаловать!"
+  rejected-external: "&cВход отклонён через %provider%."
 commands:
   no-permission: "&cУ вас нет прав на это."
   player-only: "&cЭта команда только для игроков."
@@ -57,6 +65,7 @@ commands:
   pinreset-success: "&aPIN админ-панели для %player% сброшен. При следующем /admin ему предложат установить новый."
   pinreset-nothing: "&7У %player% не установлен PIN админ-панели."
 
+  userinfo-provider: "&7  Способ входа: &f%provider% &7(id аккаунта %id%, имя %name%)"
 telegram:
   start: "Привет! Это бот авторизации для сервера. Используйте /link <код>, который вы видите в чате Minecraft при входе, чтобы привязать аккаунт."
   unknown-command: "Неизвестная команда. Используйте /link <код>."
@@ -110,3 +119,56 @@ update:
 
 api:
   authentication-denied: "&cВход отклонён другим плагином."
+
+choose:
+  header: "&6&lКак вы хотите входить?"
+  telegram: "&b&l[Telegram]"
+  telegram-hover: "&7Привязать через Telegram"
+  header-confirm: "&6&lПодтвердить этот вход через:"
+  header-add: "&6&lКакой способ входа добавить?"
+  telegram-hover-confirm: "&7Подтвердить в Telegram"
+  telegram-hover-add: "&7Добавить Telegram"
+  or: " &7или "
+  not-needed: "&cСейчас выбирать не нужно."
+  unavailable: "&cЭтот способ входа сейчас недоступен."
+
+# Ванильное окно (используется только при ui.vanilla-dialog: true). Строки с цветами &.
+dialog:
+  back: "&fНазад"
+  copy: "&fСкопировать код"
+  close: "&fЗакрыть"
+  choose:
+    title: "&6&lКак вы хотите входить?"
+    body:
+      - "&7Выберите, как привязать игровой аккаунт."
+      - "&7Так вы будете входить каждый раз."
+    body-confirm:
+      - "&7У вас привязано два способа входа."
+      - "&7Выберите, каким подтвердить этот вход."
+    body-add:
+      - "&7Выберите способ, который хотите привязать к аккаунту."
+      - "&7Входить можно будет любым из них."
+    title-confirm: "&6&lПодтвердите вход"
+    title-add: "&6&lДобавить способ входа"
+    telegram-tooltip-confirm: "&7Подтвердить в Telegram"
+    telegram-tooltip-add: "&7Добавить Telegram"
+    telegram: "&b&lTelegram"
+    telegram-tooltip: "&7Привязать через Telegram"
+  telegram:
+    title: "&b&lПривязка через Telegram"
+    body:
+      - "&eОткройте бота &f%bot%"
+      - "&eи отправьте ему команду:"
+      - "&a&l/link %code%"
+
+copy:
+  hover: "&7Нажмите, чтобы скопировать"
+
+# /add-auth-method
+addmethod:
+  not-authenticated: "&cСначала войдите."
+  all-linked: "&eУ вас уже привязаны все способы входа."
+  none-available: "&cСейчас нельзя добавить ни один способ входа."
+  telegram-code: "&eОткройте бота &f%bot% &eи отправьте ему &a/link %code% &eчтобы добавить Telegram как способ входа."
+  success-telegram: "&aTelegram добавлен как способ входа."
+  success-provider: "&a%provider% добавлен как способ входа."

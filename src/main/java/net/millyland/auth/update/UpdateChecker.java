@@ -38,6 +38,8 @@ public class UpdateChecker {
 
     private static final String REPOSITORY = "googllle9g/TgAuth-plugin";
     private static final String LATEST_RELEASE_API = "https://api.github.com/repos/" + REPOSITORY + "/releases/latest";
+    /** Used when pre-releases are included: /releases/latest never returns them. */
+    private static final String RELEASES_API = "https://api.github.com/repos/" + REPOSITORY + "/releases?per_page=20";
     private static final String RELEASES_PAGE = "https://github.com/" + REPOSITORY + "/releases";
     private static final long INITIAL_DELAY_TICKS = 20L * 15;
 
@@ -53,7 +55,6 @@ public class UpdateChecker {
     }
 
     private final TgAuthPlugin plugin;
-    private final HttpClient http;
     private final ObjectMapper mapper = new ObjectMapper();
 
     /** Newest release that is newer than the running version; null if we're up to date / unknown. */
@@ -62,10 +63,36 @@ public class UpdateChecker {
 
     public UpdateChecker(TgAuthPlugin plugin) {
         this.plugin = plugin;
-        this.http = HttpClient.newBuilder()
+    }
+
+    /** A client per check (every few hours), so a proxy change is picked up without a restart. */
+    private HttpClient newClient() {
+        HttpClient.Builder builder = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(5))
-                .followRedirects(HttpClient.Redirect.NORMAL)
-                .build();
+                .followRedirects(HttpClient.Redirect.NORMAL);
+        if (plugin.cfg().proxyForUpdates()) {
+            var used = plugin.activeProxy();
+            if (used != null) {
+                var proxy = used.proxy();
+                if (proxy.type() == net.millyland.auth.api.ProxyConfig.Type.HTTP) {
+                    builder.proxy(java.net.ProxySelector.of(new java.net.InetSocketAddress(proxy.host(), proxy.port())));
+                    if (proxy.hasCredentials()) {
+                        builder.authenticator(new java.net.Authenticator() {
+                            @Override
+                            protected java.net.PasswordAuthentication getPasswordAuthentication() {
+                                if (getRequestorType() != RequestorType.PROXY) return null;
+                                String pass = proxy.password() == null ? "" : proxy.password();
+                                return new java.net.PasswordAuthentication(proxy.username(), pass.toCharArray());
+                            }
+                        });
+                    }
+                } else {
+                    plugin.getLogger().fine("Update check: " + proxy.type() + " proxies are not supported by the "
+                            + "Java HTTP client, connecting directly.");
+                }
+            }
+        }
+        return builder.build();
     }
 
     public void start() {
@@ -94,7 +121,8 @@ public class UpdateChecker {
     public void check(Consumer<CheckResult> callback) {
         HttpRequest request;
         try {
-            request = HttpRequest.newBuilder(URI.create(LATEST_RELEASE_API))
+            request = HttpRequest.newBuilder(URI.create(plugin.cfg().updateCheckerIncludePrereleases()
+                            ? RELEASES_API : LATEST_RELEASE_API))
                     .timeout(Duration.ofSeconds(10))
                     .header("Accept", "application/vnd.github+json")
                     .header("X-GitHub-Api-Version", "2022-11-28")
@@ -106,7 +134,7 @@ public class UpdateChecker {
             return;
         }
 
-        http.sendAsync(request, HttpResponse.BodyHandlers.ofString()).whenComplete((response, error) -> {
+        newClient().sendAsync(request, HttpResponse.BodyHandlers.ofString()).whenComplete((response, error) -> {
             CheckResult result;
             try {
                 if (error != null) {
@@ -134,25 +162,48 @@ public class UpdateChecker {
         }
 
         JsonNode root = mapper.readTree(response.body());
-        if (root.path("draft").asBoolean(false) || root.path("prerelease").asBoolean(false)) {
+        boolean includePre = plugin.cfg().updateCheckerIncludePrereleases();
+
+        // /releases/latest returns one object; /releases returns an array (newest first).
+        ReleaseInfo best = null;
+        boolean sawAny = false;
+        if (root.isArray()) {
+            for (JsonNode node : root) {
+                ReleaseInfo info = parseRelease(node, includePre);
+                if (info == null) continue;
+                sawAny = true;
+                if (best == null || Versions.isNewer(info.version(), best.version())) {
+                    best = info;
+                }
+            }
+        } else {
+            best = parseRelease(root, includePre);
+            sawAny = best != null;
+        }
+
+        if (!sawAny) {
             return new CheckResult(Outcome.NO_RELEASES, null);
         }
-
-        String tag = root.path("tag_name").asText("").trim();
-        if (!SAFE_TAG.matcher(tag).matches()) {
-            return new CheckResult(Outcome.FAILED, null);
+        if (best != null && Versions.isNewer(best.version(), currentVersion())) {
+            return new CheckResult(Outcome.UPDATE_AVAILABLE, best);
         }
+        return new CheckResult(Outcome.UP_TO_DATE, null);
+    }
+
+    /** Returns null for drafts, for pre-releases when they are not wanted, and for malformed tags. */
+    private ReleaseInfo parseRelease(JsonNode node, boolean includePre) {
+        if (node.path("draft").asBoolean(false)) return null;
+        if (!includePre && node.path("prerelease").asBoolean(false)) return null;
+
+        String tag = node.path("tag_name").asText("").trim();
+        if (!SAFE_TAG.matcher(tag).matches()) return null;
         String version = (tag.startsWith("v") || tag.startsWith("V")) ? tag.substring(1) : tag;
 
-        String url = root.path("html_url").asText("");
+        String url = node.path("html_url").asText("");
         if (!url.startsWith("https://github.com/")) {
             url = RELEASES_PAGE;
         }
-
-        if (Versions.isNewer(version, currentVersion())) {
-            return new CheckResult(Outcome.UPDATE_AVAILABLE, new ReleaseInfo(version, url));
-        }
-        return new CheckResult(Outcome.UP_TO_DATE, null);
+        return new ReleaseInfo(version, url);
     }
 
     private void handle(CheckResult result, Consumer<CheckResult> callback) {
